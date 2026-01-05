@@ -35,8 +35,8 @@ exports.handler = async (event) => {
       const p = deal.properties;
       const programName = p.dealname || "Program Payment";
 
-      const programFee = num(p.amount);
       const payments = parsePayments(p);
+      const programFee = num(p.amount);
       const totalPaid =
         !isNaN(num(p.total_amount_paid))
           ? num(p.total_amount_paid)
@@ -123,21 +123,15 @@ exports.handler = async (event) => {
 
 /* ================= HUBSPOT ================= */
 
-async function hubSpotFetch(path, options = {}) {
+async function hubSpotFetch(path) {
   const res = await fetch(`${HUBSPOT_BASE}${path}`, {
-    ...options,
     headers: {
       "Content-Type": "application/json",
       Authorization: `Bearer ${process.env.HUBSPOT_PRIVATE_APP_TOKEN}`,
     },
   });
 
-  if (!res.ok) {
-    const body = await res.text();
-    console.error("HubSpot error:", body);
-    throw new Error("HubSpot error");
-  }
-
+  if (!res.ok) throw new Error("HubSpot API error");
   return res.json();
 }
 
@@ -162,8 +156,7 @@ function renderDealPortal(deal) {
       : payments.reduce((s, p) => s + p.amount, 0);
 
   const remaining = tuition - totalPaid;
-  const depositTarget = 2500;
-  const depositRemaining = Math.max(0, depositTarget - totalPaid);
+  const depositRemaining = Math.max(0, 2500 - totalPaid);
 
   const rows =
     payments.length
@@ -189,25 +182,10 @@ function renderDealPortal(deal) {
 </div>
 
 <div class="payment-columns">
-
   <div>
-    ${
-      totalPaid === 0
-        ? paymentButton("Pay Application Fee", "appfee", 250)
-        : ""
-    }
-
-    ${
-      totalPaid > 0 && totalPaid < 2250
-        ? paymentButton("Pay Deposit", "deposit", depositRemaining)
-        : ""
-    }
-
-    ${
-      remaining > 0
-        ? paymentButton("Pay Remaining Balance", "remaining", remaining)
-        : "<p><strong>Your balance is fully paid.</strong></p>"
-    }
+    ${totalPaid === 0 ? paymentButton(deal.id, "Pay Application Fee", "appfee", 250) : ""}
+    ${totalPaid > 0 && totalPaid < 2250 ? paymentButton(deal.id, "Pay Deposit", "deposit", depositRemaining) : ""}
+    ${remaining > 0 ? paymentButton(deal.id, "Pay Remaining Balance", "remaining", remaining) : "<strong>Paid in full</strong>"}
   </div>
 
   ${
@@ -215,13 +193,11 @@ function renderDealPortal(deal) {
       ? `
   <div class="custom-card">
     <h3>Make a Payment</h3>
-    <input id="customAmount" type="number" min="250" max="${remaining}" step="0.01" placeholder="250.00">
+    <input id="amt" type="number" min="250" max="${remaining}" step="0.01">
     <button onclick="customPay()">Pay</button>
-    <div id="calc"></div>
   </div>`
       : ""
   }
-
 </div>
 
 <div class="payment-disclaimer">
@@ -242,13 +218,11 @@ function renderDealPortal(deal) {
 
 <script>
 function customPay(){
-  const v = parseFloat(document.getElementById('customAmount').value);
-  if(v < 250) return alert('Minimum payment is $250');
-  const p = new URLSearchParams(location.search);
-  p.set('checkout','1');
-  p.set('type','custom');
-  p.set('amount',v.toFixed(2));
-  location.search = p.toString();
+  const v=parseFloat(document.getElementById('amt').value);
+  if(v<250) return alert('Minimum $250');
+  const p=new URLSearchParams(location.search);
+  p.set('checkout','1');p.set('type','custom');p.set('amount',v.toFixed(2));
+  location.search=p.toString();
 }
 </script>
 `);
@@ -256,22 +230,15 @@ function customPay(){
 
 /* ================= HELPERS ================= */
 
-function paymentButton(label, type, amt) {
+function paymentButton(dealId, label, type, amt) {
   const fee = amt * 0.035;
   return `
-  <div class="pay-block">
-    <a href="?checkout=1&type=${type}&dealId=${encodeURIComponent(
-    dealIdFromLocation()
-  )}" class="btn">${label} (${money(amt)})</a>
-    <div class="fee">Base ${money(amt)} | Fee ${money(fee)} | <strong>Total ${money(
-    amt + fee
-  )}</strong></div>
-  </div>`;
-}
-
-function dealIdFromLocation() {
-  const p = new URLSearchParams(location.search);
-  return p.get("dealId");
+<div class="pay-block">
+  <a class="btn" href="?checkout=1&type=${type}&dealId=${dealId}">
+    ${label} (${money(amt)})
+  </a>
+  <div class="fee">Base ${money(amt)} | Fee ${money(fee)} | <strong>Total ${money(amt + fee)}</strong></div>
+</div>`;
 }
 
 function parsePayments(p) {
@@ -299,16 +266,12 @@ function escape(s) {
 }
 
 function page(body) {
-  return `
-<!DOCTYPE html>
-<html>
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width">
+  return `<!DOCTYPE html><html><head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width">
 <style>
 body{font-family:system-ui;background:#f3f4f6;margin:0}
 .container{max-width:760px;margin:40px auto;padding:24px;background:#fff;border-radius:16px}
-.summary-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px;margin-bottom:20px}
+.summary-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px}
 .summary-card{border:1px solid #e5e7eb;border-radius:12px;padding:14px}
 .summary-card.highlight{border-color:#4f46e5}
 .payment-columns{display:grid;grid-template-columns:1fr 300px;gap:24px}
@@ -321,12 +284,8 @@ th,td{padding:10px;border-bottom:1px solid #e5e7eb}
 th{background:#f9fafb;font-size:.8rem}
 .payment-disclaimer{margin:24px 0 12px;padding-top:12px;border-top:1px solid #e5e7eb;font-size:.85rem;color:#4b5563}
 .btn{display:inline-block;padding:8px 14px;border-radius:999px;background:#4f46e5;color:#fff;text-decoration:none}
-</style>
-</head>
-<body>
-<div class="container">${body}</div>
-</body>
-</html>`;
+</style></head>
+<body><div class="container">${body}</div></body></html>`;
 }
 
 function textResponse(code, msg) {
