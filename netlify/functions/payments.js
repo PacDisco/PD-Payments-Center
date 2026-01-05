@@ -11,8 +11,6 @@ const PAYMENT_FIELDS = [
   "payment_5",
 ];
 
-let contactEmailGlobal = null;
-
 exports.handler = async (event) => {
   try {
     const url = new URL(event.rawUrl);
@@ -20,59 +18,56 @@ exports.handler = async (event) => {
     const dealId = url.searchParams.get("dealId");
     const checkout = url.searchParams.get("checkout");
 
-    contactEmailGlobal = email;
-
     if (!process.env.HUBSPOT_PRIVATE_APP_TOKEN) {
       return textResponse(500, "HubSpot token missing.");
     }
 
-    /* ---------- STRIPE CHECKOUT ---------- */
+    /* ================= STRIPE CHECKOUT ================= */
     if (checkout === "1") {
       if (!process.env.STRIPE_SECRET_KEY) {
         return textResponse(500, "Stripe key missing.");
       }
-
       if (!dealId) return textResponse(400, "Missing dealId.");
 
       const deal = await getDealById(dealId);
       if (!deal) return textResponse(404, "Deal not found.");
 
-      const p = deal.properties || {};
+      const p = deal.properties;
       const programName = p.dealname || "Program Payment";
 
-      const programFee = safeNumber(p.amount);
-      const totalPaid = safeNumber(p.total_amount_paid) || 0;
+      const programFee = number(p.amount);
+      const totalPaid = number(p.total_amount_paid);
       const remaining = programFee - totalPaid;
 
       const depositTarget = 2500;
       const depositRemaining = Math.max(0, depositTarget - totalPaid);
 
-      let type = url.searchParams.get("type");
-      let baseAmount = 0;
+      const type = url.searchParams.get("type");
+      let base = 0;
       let label = "";
 
       if (type === "appfee") {
-        baseAmount = 250;
+        base = 250;
         label = "Application Fee";
       } else if (type === "deposit") {
-        baseAmount = depositRemaining;
+        base = depositRemaining;
         label = "Program Deposit";
       } else if (type === "custom") {
-        const amt = safeNumber(url.searchParams.get("amount"));
-        if (isNaN(amt) || amt < 250 || amt > remaining) {
+        const amt = number(url.searchParams.get("amount"));
+        if (amt < 250 || amt > remaining) {
           return textResponse(400, "Invalid custom amount.");
         }
-        baseAmount = amt;
+        base = amt;
         label = "Custom Payment";
       } else {
-        baseAmount = remaining;
+        base = remaining;
         label = "Remaining Program Balance";
       }
 
-      if (baseAmount <= 0) return textResponse(400, "No balance due.");
+      if (base <= 0) return textResponse(400, "No balance due.");
 
-      const fee = baseAmount * 0.035;
-      const totalWithFee = baseAmount + fee;
+      const fee = base * 0.035;
+      const total = base + fee;
 
       const baseUrl = new URL(event.rawUrl);
       baseUrl.search = "";
@@ -91,7 +86,7 @@ exports.handler = async (event) => {
                 name: programName,
                 description: `${label} – Deal ID: ${dealId}`,
               },
-              unit_amount: Math.round(totalWithFee * 100),
+              unit_amount: Math.round(total * 100),
             },
             quantity: 1,
           },
@@ -109,217 +104,204 @@ exports.handler = async (event) => {
       };
     }
 
-    /* ---------- PAGE RENDER ---------- */
-    if (dealId) {
-      const deal = await getDealById(dealId);
-      deal.properties.email = email;
-      return htmlResponse(200, renderDealPortal(deal));
-    }
+    /* ================= PAGE RENDER ================= */
+    if (!dealId) return textResponse(400, "Missing dealId.");
 
-    return textResponse(400, "Missing dealId.");
-  } catch (e) {
-    console.error(e);
+    const deal = await getDealById(dealId);
+    if (!deal) return textResponse(404, "Deal not found.");
+    deal.properties.email = email;
+
+    return htmlResponse(200, renderDealPortal(deal));
+  } catch (err) {
+    console.error(err);
     return textResponse(500, "Unexpected error.");
   }
 };
 
-/* ---------- RENDER ---------- */
+/* ================= HUBSPOT HELPERS ================= */
+
+async function hubSpotFetch(path, options = {}) {
+  const res = await fetch(`${HUBSPOT_BASE}${path}`, {
+    ...options,
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${process.env.HUBSPOT_PRIVATE_APP_TOKEN}`,
+      ...(options.headers || {}),
+    },
+  });
+
+  if (!res.ok) {
+    const body = await res.text();
+    console.error("HubSpot error:", res.status, body);
+    throw new Error("HubSpot API error");
+  }
+
+  return res.json();
+}
+
+async function getDealById(dealId) {
+  const data = await hubSpotFetch(
+    `/crm/v3/objects/deals/${dealId}?properties=${encodeURIComponent(
+      ["dealname", "amount", "total_amount_paid", ...PAYMENT_FIELDS].join(",")
+    )}`
+  );
+
+  return {
+    id: data.id,
+    properties: data.properties || {},
+  };
+}
+
+/* ================= UI ================= */
 
 function renderDealPortal(deal) {
   const p = deal.properties;
-  const programFee = safeNumber(p.amount);
-  const totalPaid = safeNumber(p.total_amount_paid) || 0;
-  const remaining = programFee - totalPaid;
+  const tuition = number(p.amount);
+  const paid = number(p.total_amount_paid);
+  const remaining = tuition - paid;
 
   const depositTarget = 2500;
-  const depositRemaining = Math.max(0, depositTarget - totalPaid);
+  const depositRemaining = Math.max(0, depositTarget - paid);
 
-  const encodedDeal = encodeURIComponent(deal.id);
-  const encodedEmail = encodeURIComponent(p.email || "");
+  return page(`
+    <h1>${escape(p.dealname || "Program")}</h1>
 
-  return stripePage(
-    "Payment Summary",
-    `
-<div class="container">
-  <h1>${escapeHtml(p.dealname || "Program")}</h1>
+    <div class="grid">
+      <div>
+        <p><strong>Program Tuition:</strong> ${money(tuition)}</p>
+        <p><strong>Paid:</strong> ${money(paid)}</p>
+        <p><strong>Remaining:</strong> ${money(remaining)}</p>
 
-  <div class="summary-grid">
-    <div class="summary-card">
-      <div class="label">Program Tuition</div>
-      <div class="value">${fmt(programFee)}</div>
-    </div>
-    <div class="summary-card">
-      <div class="label">Paid So Far</div>
-      <div class="value">${fmt(totalPaid)}</div>
-    </div>
-    <div class="summary-card highlight">
-      <div class="label">Remaining Balance</div>
-      <div class="value">${fmt(remaining)}</div>
-    </div>
-  </div>
+        ${
+          paid === 0
+            ? button("Pay Application Fee", `?checkout=1&type=appfee&dealId=${deal.id}`, 250)
+            : ""
+        }
 
-  <div class="payment-columns">
+        ${
+          paid > 0 && paid < 2250
+            ? button(
+                `Pay Deposit (${money(depositRemaining)})`,
+                `?checkout=1&type=deposit&dealId=${deal.id}`,
+                depositRemaining
+              )
+            : ""
+        }
 
-    <div class="payment-left-column">
-      ${
-        totalPaid === 0
-          ? `<div class="button-block">
-              <a class="btn btn-blue" href="?checkout=1&type=appfee&dealId=${encodedDeal}&email=${encodedEmail}">
-                Pay Application Fee
-              </a>
-              ${feeBox(250)}
-            </div>`
-          : ""
-      }
-
-      ${
-        totalPaid > 0 && totalPaid < 2250
-          ? `<div class="button-block">
-              <a class="btn btn-green" href="?checkout=1&type=deposit&dealId=${encodedDeal}&email=${encodedEmail}">
-                Pay Deposit (${fmt(depositRemaining)})
-              </a>
-              ${feeBox(depositRemaining)}
-            </div>`
-          : ""
-      }
+        ${
+          remaining > 0
+            ? button(
+                "Pay Remaining Balance",
+                `?checkout=1&type=remaining&dealId=${deal.id}`,
+                remaining
+              )
+            : "<p><strong>Fully paid</strong></p>"
+        }
+      </div>
 
       ${
         remaining > 0
-          ? `<div class="button-block">
-              <a class="btn btn-purple" href="?checkout=1&type=remaining&dealId=${encodedDeal}&email=${encodedEmail}">
-                Pay Remaining Balance
-              </a>
-              ${feeBox(remaining)}
-            </div>`
-          : `<div class="paid-message">Your balance is fully paid.</div>`
+          ? `
+      <div class="card">
+        <h3>Make a Payment</h3>
+        <input id="amt" type="number" min="250" max="${remaining}" step="0.01">
+        <button onclick="pay()">Pay</button>
+        <div id="calc"></div>
+      </div>`
+          : ""
       }
     </div>
 
-    ${
-      remaining > 0
-        ? `
-    <div class="payment-right-column">
-      <div class="custom-payment-card" id="custom-payment-section" data-remaining="${remaining}">
-        <h3>Make a Payment</h3>
-        <p>Minimum $250, up to remaining balance.</p>
-        <form id="custom-payment-form">
-          <input type="number" id="custom-amount" min="250" max="${remaining}" step="0.01" required />
-          <button class="btn btn-dark small-btn">Make a Payment</button>
-        </form>
-        <div id="custom-fee-summary" class="fee-breakdown small"></div>
-        <div id="custom-error" class="error-message"></div>
-      </div>
-    </div>`
-        : ""
-    }
+    <!-- ✅ NEW DISCLAIMER -->
+    <div class="disclaimer">
+      <em>
+        A 3.5% transaction fee is applied to all credit card payments.
+        To pay by wire transfer or ACH without the transaction fee,
+        <a href="https://www.pacificdiscovery.org/student/payment/pay-now/wire-transfer-payment" target="_blank">
+          click here to view wire transfer payment instructions
+        </a>.
+      </em>
+    </div>
 
-  </div>
-
-  <!-- ✅ ONLY NEW ADDITION -->
-  <div class="payment-disclaimer">
-    <em>
-      A 3.5% transaction fee is applied to all credit card payments.
-      To pay by wire transfer or ACH without the transaction fee,
-      <a href="https://www.pacificdiscovery.org/student/payment/pay-now/wire-transfer-payment"
-         target="_blank" rel="noopener noreferrer">
-        click here to view wire transfer payment instructions
-      </a>.
-    </em>
-  </div>
-
-  <div class="section">
-    <h2>Payment History</h2>
-  </div>
-</div>
-
-${remaining > 0 ? customPaymentScript() : ""}
-`
-  );
+    <script>
+      function pay(){
+        const v = parseFloat(document.getElementById('amt').value);
+        if(v < 250) return alert('Minimum $250');
+        const p = new URLSearchParams(location.search);
+        p.set('checkout','1');
+        p.set('type','custom');
+        p.set('amount',v.toFixed(2));
+        location.search = p.toString();
+      }
+    </script>
+  `);
 }
 
-/* ---------- HELPERS ---------- */
+/* ================= HTML ================= */
 
-function feeBox(base) {
-  const fee = base * 0.035;
-  return `<div class="fee-breakdown">
-    Base: ${fmt(base)}<br>
-    Fee (3.5%): ${fmt(fee)}<br>
-    <strong>Total: ${fmt(base + fee)}</strong>
-  </div>`;
-}
-
-function customPaymentScript() {
-  return `<script>
-(function(){
-  const s=document.getElementById('custom-payment-section');
-  if(!s) return;
-  const max=parseFloat(s.dataset.remaining);
-  const i=document.getElementById('custom-amount');
-  const f=document.getElementById('custom-fee-summary');
-  const e=document.getElementById('custom-error');
-
-  i.addEventListener('input',()=>{
-    const v=parseFloat(i.value||0);
-    if(v<250||v>max){f.textContent='';return;}
-    const fee=v*0.035;
-    f.innerHTML='Base: $'+v.toFixed(2)+'<br>Fee (3.5%): $'+fee.toFixed(2)+'<br><strong>Total: $'+(v+fee).toFixed(2)+'</strong>';
-  });
-
-  document.getElementById('custom-payment-form').onsubmit=function(ev){
-    ev.preventDefault();
-    const v=parseFloat(i.value||0);
-    if(v<250||v>max){e.textContent='Invalid amount.';return;}
-    const p=new URLSearchParams(location.search);
-    p.set('checkout','1');p.set('type','custom');p.set('amount',v.toFixed(2));
-    location.search=p.toString();
-  };
-})();
-</script>`;
-}
-
-/* ---------- PAGE ---------- */
-
-function stripePage(title, body) {
-  return `<!DOCTYPE html><html><head>
+function page(body) {
+  return `
+<!DOCTYPE html>
+<html>
+<head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>${escapeHtml(title)}</title>
+<meta name="viewport" content="width=device-width">
 <style>
 body{font-family:system-ui;background:#f3f4f6;margin:0}
-.container{max-width:720px;margin:40px auto;padding:24px;background:#fff;border-radius:16px}
-.summary-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px}
-.summary-card{border:1px solid #e5e7eb;border-radius:12px;padding:14px}
-.summary-card.highlight{border-color:#4f46e5}
-.payment-columns{display:grid;grid-template-columns:1fr 280px;gap:24px;margin-top:20px}
-@media(max-width:900px){.payment-columns{grid-template-columns:1fr}}
-.btn{display:inline-block;padding:10px 18px;border-radius:999px;color:#fff;text-decoration:none}
-.btn-blue{background:#3b82f6}.btn-green{background:#10b981}.btn-purple{background:#4f46e5}.btn-dark{background:#111827}
-.custom-payment-card{border:1px solid #e5e7eb;border-radius:14px;padding:18px;background:#fafafa}
-.payment-disclaimer{margin-top:24px;padding-top:12px;border-top:1px solid #e5e7eb;font-size:.85rem;color:#4b5563}
-.payment-disclaimer a{color:#4f46e5}
+h1{margin-top:0}
+.grid{display:grid;grid-template-columns:1fr 300px;gap:24px}
+@media(max-width:900px){.grid{grid-template-columns:1fr}}
+.card{background:#fafafa;padding:16px;border-radius:12px;border:1px solid #e5e7eb}
+button{padding:8px 12px;margin-top:8px}
+.disclaimer{margin-top:24px;font-size:.85rem;color:#4b5563;border-top:1px solid #e5e7eb;padding-top:12px}
 </style>
-</head><body>${body}</body></html>`;
+</head>
+<body>
+<div style="max-width:720px;margin:40px auto;background:#fff;padding:24px;border-radius:16px">
+${body}
+</div>
+</body>
+</html>
+`;
 }
 
-/* ---------- UTILS ---------- */
+/* ================= HELPERS ================= */
 
-function fmt(n) {
-  return isNaN(n)
-    ? "—"
-    : "$" + n.toLocaleString("en-US", { minimumFractionDigits: 2 });
+function button(label, href, amt) {
+  const fee = amt * 0.035;
+  return `
+    <p>
+      <a href="${href}">${label}</a><br>
+      Base: ${money(amt)} | Fee: ${money(fee)} | <strong>Total: ${money(
+    amt + fee
+  )}</strong>
+    </p>
+  `;
 }
-function safeNumber(v) {
+
+function number(v) {
   const n = Number(v);
-  return isNaN(n) ? NaN : n;
+  return isNaN(n) ? 0 : n;
 }
-function escapeHtml(s) {
+
+function money(v) {
+  return "$" + v.toFixed(2);
+}
+
+function escape(s) {
   return String(s).replace(/[&<>"]/g, (c) =>
     ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c])
   );
 }
+
 function textResponse(code, msg) {
-  return { statusCode: code, headers: { "Content-Type": "text/plain" }, body: msg };
+  return { statusCode: code, body: msg };
 }
+
 function htmlResponse(code, html) {
-  return { statusCode: code, headers: { "Content-Type": "text/html" }, body: html };
+  return {
+    statusCode: code,
+    headers: { "Content-Type": "text/html" },
+    body: html,
+  };
 }
