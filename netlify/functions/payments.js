@@ -22,7 +22,7 @@ exports.handler = async (event) => {
       return textResponse(500, "HubSpot token missing.");
     }
 
-    /* ---------- STRIPE CHECKOUT ---------- */
+    /* ================= STRIPE CHECKOUT ================= */
     if (checkout === "1") {
       if (!process.env.STRIPE_SECRET_KEY) {
         return textResponse(500, "Stripe key missing.");
@@ -32,7 +32,7 @@ exports.handler = async (event) => {
       const deal = await getDealById(dealId);
       if (!deal) return textResponse(404, "Deal not found.");
 
-      const p = deal.properties || {};
+      const p = deal.properties;
       const programName = p.dealname || "Program Payment";
 
       const programFee = num(p.amount);
@@ -46,32 +46,32 @@ exports.handler = async (event) => {
       const depositTarget = 2500;
       const depositRemaining = Math.max(0, depositTarget - totalPaid);
 
-      let type = url.searchParams.get("type");
-      let baseAmount = 0;
+      const type = url.searchParams.get("type");
+      let base = 0;
       let label = "";
 
       if (type === "appfee") {
-        baseAmount = 250;
+        base = 250;
         label = "Application Fee";
       } else if (type === "deposit") {
-        baseAmount = depositRemaining;
+        base = depositRemaining;
         label = "Program Deposit";
       } else if (type === "custom") {
         const amt = num(url.searchParams.get("amount"));
-        if (isNaN(amt) || amt < 250 || amt > remaining) {
+        if (amt < 250 || amt > remaining) {
           return textResponse(400, "Invalid custom amount.");
         }
-        baseAmount = amt;
+        base = amt;
         label = "Custom Payment";
       } else {
-        baseAmount = remaining;
+        base = remaining;
         label = "Remaining Program Balance";
       }
 
-      if (baseAmount <= 0) return textResponse(400, "No balance due.");
+      if (base <= 0) return textResponse(400, "No balance due.");
 
-      const fee = baseAmount * 0.035;
-      const total = baseAmount + fee;
+      const fee = base * 0.035;
+      const total = base + fee;
 
       const baseUrl = new URL(event.rawUrl);
       baseUrl.search = "";
@@ -108,7 +108,7 @@ exports.handler = async (event) => {
       };
     }
 
-    /* ---------- PAGE ---------- */
+    /* ================= PAGE ================= */
     if (!dealId) return textResponse(400, "Missing dealId.");
 
     const deal = await getDealById(dealId);
@@ -147,7 +147,6 @@ async function getDealById(dealId) {
       ["dealname", "amount", "total_amount_paid", ...PAYMENT_FIELDS].join(",")
     )}`
   );
-
   return { id: data.id, properties: data.properties || {} };
 }
 
@@ -156,18 +155,18 @@ async function getDealById(dealId) {
 function renderDealPortal(deal) {
   const p = deal.properties;
   const payments = parsePayments(p);
-  const programFee = num(p.amount);
+  const tuition = num(p.amount);
   const totalPaid =
     !isNaN(num(p.total_amount_paid))
       ? num(p.total_amount_paid)
       : payments.reduce((s, p) => s + p.amount, 0);
 
-  const remaining = programFee - totalPaid;
+  const remaining = tuition - totalPaid;
   const depositTarget = 2500;
   const depositRemaining = Math.max(0, depositTarget - totalPaid);
 
   const rows =
-    payments.length > 0
+    payments.length
       ? payments
           .map(
             (p) => `
@@ -184,9 +183,45 @@ function renderDealPortal(deal) {
 <h1>${escape(p.dealname || "Program")}</h1>
 
 <div class="summary-grid">
-  <div class="summary-card"><div class="label">Program Tuition</div><div class="value">${money(programFee)}</div></div>
+  <div class="summary-card"><div class="label">Program Tuition</div><div class="value">${money(tuition)}</div></div>
   <div class="summary-card"><div class="label">Paid So Far</div><div class="value">${money(totalPaid)}</div></div>
   <div class="summary-card highlight"><div class="label">Remaining Balance</div><div class="value">${money(remaining)}</div></div>
+</div>
+
+<div class="payment-columns">
+
+  <div>
+    ${
+      totalPaid === 0
+        ? paymentButton("Pay Application Fee", "appfee", 250)
+        : ""
+    }
+
+    ${
+      totalPaid > 0 && totalPaid < 2250
+        ? paymentButton("Pay Deposit", "deposit", depositRemaining)
+        : ""
+    }
+
+    ${
+      remaining > 0
+        ? paymentButton("Pay Remaining Balance", "remaining", remaining)
+        : "<p><strong>Your balance is fully paid.</strong></p>"
+    }
+  </div>
+
+  ${
+    remaining > 0
+      ? `
+  <div class="custom-card">
+    <h3>Make a Payment</h3>
+    <input id="customAmount" type="number" min="250" max="${remaining}" step="0.01" placeholder="250.00">
+    <button onclick="customPay()">Pay</button>
+    <div id="calc"></div>
+  </div>`
+      : ""
+  }
+
 </div>
 
 <div class="payment-disclaimer">
@@ -204,31 +239,59 @@ function renderDealPortal(deal) {
 <thead><tr><th>Amount</th><th>Date</th><th>Transaction ID</th></tr></thead>
 <tbody>${rows}</tbody>
 </table>
+
+<script>
+function customPay(){
+  const v = parseFloat(document.getElementById('customAmount').value);
+  if(v < 250) return alert('Minimum payment is $250');
+  const p = new URLSearchParams(location.search);
+  p.set('checkout','1');
+  p.set('type','custom');
+  p.set('amount',v.toFixed(2));
+  location.search = p.toString();
+}
+</script>
 `);
 }
 
 /* ================= HELPERS ================= */
 
+function paymentButton(label, type, amt) {
+  const fee = amt * 0.035;
+  return `
+  <div class="pay-block">
+    <a href="?checkout=1&type=${type}&dealId=${encodeURIComponent(
+    dealIdFromLocation()
+  )}" class="btn">${label} (${money(amt)})</a>
+    <div class="fee">Base ${money(amt)} | Fee ${money(fee)} | <strong>Total ${money(
+    amt + fee
+  )}</strong></div>
+  </div>`;
+}
+
+function dealIdFromLocation() {
+  const p = new URLSearchParams(location.search);
+  return p.get("dealId");
+}
+
 function parsePayments(p) {
-  const payments = [];
+  const out = [];
   PAYMENT_FIELDS.forEach((k) => {
     if (!p[k]) return;
-    const [amount, txn, date] = p[k].split(",").map((s) => s.trim());
-    const a = num(amount);
-    if (!isNaN(a)) payments.push({ amount: a, txn, date });
+    const [a, t, d] = p[k].split(",").map((s) => s.trim());
+    const amt = num(a);
+    if (!isNaN(amt)) out.push({ amount: amt, txn: t, date: d });
   });
-  return payments;
+  return out;
 }
 
 function num(v) {
   const n = Number(v);
   return isNaN(n) ? NaN : n;
 }
-
 function money(v) {
   return "$" + v.toLocaleString("en-US", { minimumFractionDigits: 2 });
 }
-
 function escape(s) {
   return String(s || "").replace(/[&<>"]/g, (c) =>
     ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c])
@@ -245,14 +308,19 @@ function page(body) {
 <style>
 body{font-family:system-ui;background:#f3f4f6;margin:0}
 .container{max-width:760px;margin:40px auto;padding:24px;background:#fff;border-radius:16px}
-.summary-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px}
+.summary-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px;margin-bottom:20px}
 .summary-card{border:1px solid #e5e7eb;border-radius:12px;padding:14px}
 .summary-card.highlight{border-color:#4f46e5}
+.payment-columns{display:grid;grid-template-columns:1fr 300px;gap:24px}
+@media(max-width:900px){.payment-columns{grid-template-columns:1fr}}
+.custom-card{border:1px solid #e5e7eb;border-radius:12px;padding:16px;background:#fafafa}
+.pay-block{margin-bottom:16px}
+.fee{font-size:.85rem;color:#4b5563}
 table{width:100%;border-collapse:collapse;margin-top:12px}
-th,td{padding:10px;border-bottom:1px solid #e5e7eb;text-align:left}
+th,td{padding:10px;border-bottom:1px solid #e5e7eb}
 th{background:#f9fafb;font-size:.8rem}
-.empty-row{text-align:center;color:#9ca3af}
 .payment-disclaimer{margin:24px 0 12px;padding-top:12px;border-top:1px solid #e5e7eb;font-size:.85rem;color:#4b5563}
+.btn{display:inline-block;padding:8px 14px;border-radius:999px;background:#4f46e5;color:#fff;text-decoration:none}
 </style>
 </head>
 <body>
