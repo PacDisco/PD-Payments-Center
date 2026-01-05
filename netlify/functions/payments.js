@@ -33,18 +33,16 @@ exports.handler = async (event) => {
       if (!deal) return textResponse(404, "Deal not found.");
 
       const p = deal.properties;
-      const programName = p.dealname || "Program Payment";
-
       const payments = parsePayments(p);
-      const programFee = num(p.amount);
+
+      const tuition = num(p.amount);
       const totalPaid =
         !isNaN(num(p.total_amount_paid))
           ? num(p.total_amount_paid)
           : payments.reduce((s, p) => s + p.amount, 0);
 
-      const remaining = programFee - totalPaid;
-      const depositTarget = 2500;
-      const depositRemaining = Math.max(0, depositTarget - totalPaid);
+      const remaining = tuition - totalPaid;
+      const depositRemaining = Math.max(0, 2500 - totalPaid);
 
       const type = url.searchParams.get("type");
       let base = 0;
@@ -87,7 +85,7 @@ exports.handler = async (event) => {
             price_data: {
               currency: "usd",
               product_data: {
-                name: programName,
+                name: p.dealname || "Program Payment",
                 description: `${label} – Deal ID: ${dealId}`,
               },
               unit_amount: Math.round(total * 100),
@@ -149,6 +147,7 @@ async function getDealById(dealId) {
 function renderDealPortal(deal) {
   const p = deal.properties;
   const payments = parsePayments(p);
+
   const tuition = num(p.amount);
   const totalPaid =
     !isNaN(num(p.total_amount_paid))
@@ -181,11 +180,27 @@ function renderDealPortal(deal) {
   <div class="summary-card highlight"><div class="label">Remaining Balance</div><div class="value">${money(remaining)}</div></div>
 </div>
 
-<div class="payment-columns">
-  <div>
-    ${totalPaid === 0 ? paymentButton(deal.id, "Pay Application Fee", "appfee", 250) : ""}
-    ${totalPaid > 0 && totalPaid < 2250 ? paymentButton(deal.id, "Pay Deposit", "deposit", depositRemaining) : ""}
-    ${remaining > 0 ? paymentButton(deal.id, "Pay Remaining Balance", "remaining", remaining) : "<strong>Paid in full</strong>"}
+<div class="payment-layout">
+  <div class="actions">
+
+    ${
+      totalPaid === 0
+        ? presetButton(deal.id, "Pay Application Fee", "appfee", 250)
+        : ""
+    }
+
+    ${
+      totalPaid > 0 && totalPaid < 2250
+        ? presetButton(deal.id, "Pay Deposit", "deposit", depositRemaining)
+        : ""
+    }
+
+    ${
+      remaining > 0
+        ? presetButton(deal.id, "Pay Remaining Balance", "remaining", remaining)
+        : `<strong>Your balance is fully paid.</strong>`
+    }
+
   </div>
 
   ${
@@ -193,8 +208,12 @@ function renderDealPortal(deal) {
       ? `
   <div class="custom-card">
     <h3>Make a Payment</h3>
-    <input id="amt" type="number" min="250" max="${remaining}" step="0.01">
-    <button onclick="customPay()">Pay</button>
+    <p class="sub">
+      Minimum $250, up to your remaining balance.
+    </p>
+    <input id="customAmount" type="number" min="250" max="${remaining}" step="0.01" placeholder="250.00">
+    <div id="customCalc" class="calc"></div>
+    <button onclick="customPay()">Make a Payment</button>
   </div>`
       : ""
   }
@@ -217,20 +236,38 @@ function renderDealPortal(deal) {
 </table>
 
 <script>
-function customPay(){
-  const v=parseFloat(document.getElementById('amt').value);
-  if(v<250) return alert('Minimum $250');
-  const p=new URLSearchParams(location.search);
-  p.set('checkout','1');p.set('type','custom');p.set('amount',v.toFixed(2));
-  location.search=p.toString();
+const input = document.getElementById('customAmount');
+const calc = document.getElementById('customCalc');
+
+if(input){
+  input.addEventListener('input',()=>{
+    const v = parseFloat(input.value||0);
+    if(v < 250 || v > ${remaining}){ calc.textContent=''; return; }
+    const fee = v * 0.035;
+    calc.innerHTML =
+      'Base ' + fmt(v) +
+      ' | Fee ' + fmt(fee) +
+      ' | <strong>Total ' + fmt(v+fee) + '</strong>';
+  });
 }
+
+function customPay(){
+  const v = parseFloat(input.value||0);
+  if(v < 250 || v > ${remaining}) return alert('Invalid amount');
+  const p = new URLSearchParams(location.search);
+  p.set('checkout','1');
+  p.set('type','custom');
+  p.set('amount',v.toFixed(2));
+  location.search = p.toString();
+}
+function fmt(n){ return '$' + n.toLocaleString('en-US',{minimumFractionDigits:2}); }
 </script>
 `);
 }
 
 /* ================= HELPERS ================= */
 
-function paymentButton(dealId, label, type, amt) {
+function presetButton(dealId, label, type, amt) {
   const fee = amt * 0.035;
   return `
 <div class="pay-block">
@@ -266,26 +303,39 @@ function escape(s) {
 }
 
 function page(body) {
-  return `<!DOCTYPE html><html><head>
-<meta charset="UTF-8"><meta name="viewport" content="width=device-width">
+  return `<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width">
 <style>
 body{font-family:system-ui;background:#f3f4f6;margin:0}
-.container{max-width:760px;margin:40px auto;padding:24px;background:#fff;border-radius:16px}
-.summary-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px}
-.summary-card{border:1px solid #e5e7eb;border-radius:12px;padding:14px}
+.container{max-width:820px;margin:40px auto;padding:24px;background:#fff;border-radius:18px}
+.summary-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:14px;margin-bottom:24px}
+.summary-card{border:1px solid #e5e7eb;border-radius:14px;padding:16px}
 .summary-card.highlight{border-color:#4f46e5}
-.payment-columns{display:grid;grid-template-columns:1fr 300px;gap:24px}
-@media(max-width:900px){.payment-columns{grid-template-columns:1fr}}
-.custom-card{border:1px solid #e5e7eb;border-radius:12px;padding:16px;background:#fafafa}
-.pay-block{margin-bottom:16px}
-.fee{font-size:.85rem;color:#4b5563}
-table{width:100%;border-collapse:collapse;margin-top:12px}
-th,td{padding:10px;border-bottom:1px solid #e5e7eb}
+.label{text-transform:uppercase;font-size:.75rem;color:#6b7280;margin-bottom:4px}
+.value{font-size:1.1rem;font-weight:600}
+.payment-layout{display:grid;grid-template-columns:1fr 320px;gap:28px}
+@media(max-width:900px){.payment-layout{grid-template-columns:1fr}}
+.custom-card{border:1px solid #e5e7eb;border-radius:14px;padding:18px;background:#fafafa;position:sticky;top:24px}
+@media(max-width:900px){.custom-card{position:static}}
+.pay-block{margin-bottom:18px}
+.fee{font-size:.85rem;color:#4b5563;margin-top:4px}
+.calc{font-size:.85rem;color:#374151;margin:6px 0}
+.btn{display:inline-block;padding:10px 18px;border-radius:999px;background:#4f46e5;color:#fff;text-decoration:none;font-weight:600}
+button{padding:10px 14px;border-radius:10px;border:none;background:#111827;color:#fff;font-weight:600;cursor:pointer}
+.payment-disclaimer{margin:28px 0 16px;padding-top:14px;border-top:1px solid #e5e7eb;font-size:.85rem;color:#4b5563}
+table{width:100%;border-collapse:collapse}
+th,td{padding:12px;border-bottom:1px solid #e5e7eb}
 th{background:#f9fafb;font-size:.8rem}
-.payment-disclaimer{margin:24px 0 12px;padding-top:12px;border-top:1px solid #e5e7eb;font-size:.85rem;color:#4b5563}
-.btn{display:inline-block;padding:8px 14px;border-radius:999px;background:#4f46e5;color:#fff;text-decoration:none}
-</style></head>
-<body><div class="container">${body}</div></body></html>`;
+.empty-row{text-align:center;color:#9ca3af}
+</style>
+</head>
+<body>
+<div class="container">${body}</div>
+</body>
+</html>`;
 }
 
 function textResponse(code, msg) {
