@@ -25,117 +25,91 @@ exports.handler = async (event) => {
     if (!process.env.HUBSPOT_PRIVATE_APP_TOKEN) {
       return textResponse(
         500,
-        "HubSpot token not configured. Please set HUBSPOT_PRIVATE_APP_TOKEN in Netlify."
+        "HubSpot token missing. Set HUBSPOT_PRIVATE_APP_TOKEN in Netlify."
       );
     }
 
-    // ---------- STRIPE CHECKOUT BRANCH ----------
+    /* ------------------ STRIPE CHECKOUT ------------------ */
+
     if (checkout === "1") {
       if (!process.env.STRIPE_SECRET_KEY) {
         return textResponse(
           500,
-          "Stripe is not configured. Please set STRIPE_SECRET_KEY in Netlify."
+          "Stripe missing. Set STRIPE_SECRET_KEY in Netlify."
         );
       }
 
-      if (!dealId) {
-        return textResponse(400, "Missing dealId for checkout.");
-      }
+      if (!dealId) return textResponse(400, "Missing dealId.");
 
-      // Get deal
       const deal = await getDealById(dealId);
       if (!deal) return textResponse(404, "Deal not found.");
 
       const p = deal.properties || {};
-      const programName = p.dealname || "Program payment";
+      const programName = p.dealname || "Program Payment";
 
-      // Base financials
       const programFee = safeNumber(p.amount);
-      const totalPaidFromField = safeNumber(p.total_amount_paid);
+      const totalPaidField = safeNumber(p.total_amount_paid);
 
-      const payments = [];
+      const allPayments = [];
       PAYMENT_FIELDS.forEach((key) => {
         const raw = p[key];
         if (!raw) return;
         const parts = raw.split(",").map((s) => s.trim());
         const amt = safeNumber(parts[0]);
-        if (!isNaN(amt)) payments.push({ amount: amt });
+        if (!isNaN(amt)) allPayments.push({ amount: amt });
       });
 
-      const totalPaid = !isNaN(totalPaidFromField)
-        ? totalPaidFromField
-        : payments.reduce((sum, pay) => sum + pay.amount, 0);
+      const totalPaid = !isNaN(totalPaidField)
+        ? totalPaidField
+        : allPayments.reduce((s, p) => s + p.amount, 0);
 
-      const remaining =
-        !isNaN(programFee) && !isNaN(totalPaid) ? programFee - totalPaid : NaN;
-
-      if (isNaN(remaining)) {
-        return textResponse(
-          400,
-          "Unable to determine remaining balance for this program."
-        );
-      }
+      const remaining = programFee - totalPaid;
 
       const depositTarget = 2500;
       const depositRemaining = Math.max(0, depositTarget - totalPaid);
 
-      // Determine payment type
-      const type = url.searchParams.get("type") || "remaining"; // remaining | deposit | appfee | custom
+      let type = url.searchParams.get("type");
       let baseAmount = 0;
-      let descriptionLabel = "";
+      let label = "";
 
       if (type === "appfee") {
         baseAmount = 250;
-        descriptionLabel = "Application Fee";
+        label = "Application Fee";
       } else if (type === "deposit") {
         baseAmount = depositRemaining;
-        descriptionLabel = "Program Deposit";
+        label = "Program Deposit";
       } else if (type === "custom") {
-        const customRaw = url.searchParams.get("amount");
-        const customAmount = safeNumber(customRaw);
-        if (isNaN(customAmount)) {
-          return textResponse(400, "Invalid custom payment amount.");
-        }
-        if (customAmount < 250) {
-          return textResponse(
-            400,
-            "Minimum custom payment amount is $250 USD."
-          );
-        }
-        if (customAmount - remaining > 0.01) {
-          return textResponse(
-            400,
-            "Custom payment amount cannot exceed remaining balance."
-          );
-        }
-        baseAmount = customAmount;
-        descriptionLabel = "Custom Payment";
+        const raw = url.searchParams.get("amount");
+        const amt = safeNumber(raw);
+        if (isNaN(amt)) return textResponse(400, "Invalid custom amount.");
+        if (amt < 250) return textResponse(400, "Minimum custom payment is $250.");
+        if (amt > remaining + 0.01)
+          return textResponse(400, "Custom amount exceeds remaining balance.");
+        baseAmount = amt;
+        label = "Custom Payment";
       } else {
-        // Remaining balance
+        type = "remaining";
         baseAmount = remaining;
-        descriptionLabel = "Remaining Program Balance";
+        label = "Remaining Program Balance";
       }
 
-      if (isNaN(baseAmount) || baseAmount <= 0) {
-        return textResponse(400, "There is no outstanding balance to pay.");
+      if (baseAmount <= 0) {
+        return textResponse(400, "No outstanding balance.");
       }
 
-      // 3.5% fee for ALL payments
-      const feeAmount = baseAmount * 0.035;
-      const totalWithFee = baseAmount + feeAmount;
+      /* Add 3.5% fee */
+      const fee = baseAmount * 0.035;
+      const totalWithFee = baseAmount + fee;
 
-      // Build cancel URL returning user to program payment page
+      /* Cancel URL returns user back to payments page */
       const baseUrl = new URL(event.rawUrl);
       baseUrl.search = "";
       const cancelUrl = new URL(baseUrl.toString());
       cancelUrl.searchParams.set("dealId", dealId);
       if (email) cancelUrl.searchParams.set("email", email);
 
-      const description = `${descriptionLabel} – Deal ID: ${dealId}`;
-
       const session = await stripe.checkout.sessions.create({
         mode: "payment",
-        payment_method_types: ["card"],
         customer_email: email || undefined,
         line_items: [
           {
@@ -143,7 +117,7 @@ exports.handler = async (event) => {
               currency: "usd",
               product_data: {
                 name: programName,
-                description,
+                description: `${label} (Deal ID: ${dealId})`,
               },
               unit_amount: Math.round(totalWithFee * 100),
             },
@@ -154,7 +128,7 @@ exports.handler = async (event) => {
           "https://pacificdiscovery.org/success?session_id={CHECKOUT_SESSION_ID}",
         cancel_url: cancelUrl.toString(),
         metadata: {
-          dealId: String(dealId),
+          dealId: dealId,
           paymentType: type,
         },
       });
@@ -165,69 +139,61 @@ exports.handler = async (event) => {
         body: "",
       };
     }
-    // ---------- END STRIPE CHECKOUT BRANCH ----------
 
-    // If dealId is present → render page
+    /* ------------------ LOOKUP MODE ------------------ */
+
     if (dealId) {
       const deal = await getDealById(dealId);
-      if (!deal) return textResponse(404, "Could not find that program / deal.");
+      if (!deal) return textResponse(404, "Deal not found.");
       deal.properties.email = email;
 
-      const html = renderDealPortal(deal);
-      return htmlResponse(200, html);
+      return htmlResponse(200, renderDealPortal(deal));
     }
 
-    // If email missing
     if (!email) {
       return htmlResponse(
         400,
         basicPage(
-          "Missing email",
-          `<p>Please access this page via the portal form so we know which account to look up.</p>`
+          "Missing Email",
+          "<p>You must access this from the payment portal link.</p>"
         )
       );
     }
 
-    // Find contact
     const contact = await findContactByEmail(email);
     if (!contact) {
       return htmlResponse(
         404,
-        basicPage(
-          "No account found",
-          `<p>No records for <strong>${escapeHtml(email)}</strong>.</p>`
-        )
+        basicPage("Not Found", `<p>No records for ${escapeHtml(email)}</p>`)
       );
     }
 
-    // Get deals
     const deals = await getDealsForContact(contact.id);
-    if (!deals || deals.length === 0) {
+    if (!deals.length) {
       return htmlResponse(
         404,
         basicPage(
-          "No programs found",
-          `<p>We found your contact but no program payment records yet.</p>`
+          "No Programs",
+          "<p>Your account exists, but no program payments found.</p>"
         )
       );
     }
 
-    // Single deal
     if (deals.length === 1) {
-      const deal = deals[0];
-      deal.properties.email = email;
-      return htmlResponse(200, renderDealPortal(deal));
+      deals[0].properties.email = email;
+      return htmlResponse(200, renderDealPortal(deals[0]));
     }
 
-    // Multiple deals → selection page
     return htmlResponse(200, renderDealSelectionPage(deals, url));
   } catch (err) {
     console.error(err);
-    return textResponse(500, "Unexpected error");
+    return textResponse(500, "Unexpected Error");
   }
 };
 
-/* ----------------- HubSpot helpers ----------------- */
+/* ---------------------------------------------------
+   HUBSPOT HELPERS
+--------------------------------------------------- */
 
 async function hubSpotFetch(path, options = {}) {
   const token = process.env.HUBSPOT_PRIVATE_APP_TOKEN;
@@ -241,10 +207,10 @@ async function hubSpotFetch(path, options = {}) {
   });
 
   if (!res.ok) {
-    const body = await res.text();
-    console.error("HubSpot error:", res.status, body);
-    throw new Error(`HubSpot API error: ${res.status}`);
+    console.error("HubSpot error", res.status);
+    throw new Error("HubSpot error");
   }
+
   return res.json();
 }
 
@@ -253,34 +219,31 @@ async function findContactByEmail(email) {
     method: "POST",
     body: JSON.stringify({
       filterGroups: [
-        {
-          filters: [{ propertyName: "email", operator: "EQ", value: email }],
-        },
+        { filters: [{ propertyName: "email", operator: "EQ", value: email }] },
       ],
-      properties: ["email", "firstname", "lastname"],
+      properties: ["email"],
       limit: 1,
     }),
   });
 
-  if (!data.results?.length) return null;
-
-  return { id: data.results[0].id, properties: data.results[0].properties };
+  return data.results?.[0]
+    ? { id: data.results[0].id, properties: data.results[0].properties }
+    : null;
 }
 
 async function getDealsForContact(contactId) {
-  const assocData = await hubSpotFetch(
+  const assoc = await hubSpotFetch(
     `/crm/v4/objects/contacts/${contactId}/associations/deals`
   );
 
-  const dealIds =
-    assocData.results?.map((r) => r.toObjectId).filter(Boolean) || [];
-  if (!dealIds.length) return [];
+  const ids = assoc.results?.map((r) => r.toObjectId) || [];
+  if (!ids.length) return [];
 
   const batch = await hubSpotFetch("/crm/v3/objects/deals/batch/read", {
     method: "POST",
     body: JSON.stringify({
       properties: ["dealname", "amount", "total_amount_paid", ...PAYMENT_FIELDS],
-      inputs: dealIds.map((id) => ({ id })),
+      inputs: ids.map((id) => ({ id })),
     }),
   });
 
@@ -288,76 +251,27 @@ async function getDealsForContact(contactId) {
     batch.results?.map((d) => ({
       id: d.id,
       properties: { ...d.properties, email: contactEmailGlobal },
-    })) ?? []
+    })) || []
   );
 }
 
-async function getDealById(dealId) {
+async function getDealById(id) {
   const data = await hubSpotFetch(
-    `/crm/v3/objects/deals/${dealId}?properties=${encodeURIComponent(
+    `/crm/v3/objects/deals/${id}?properties=${encodeURIComponent(
       ["dealname", "amount", "total_amount_paid", ...PAYMENT_FIELDS].join(",")
     )}`
   );
-
-  if (!data?.id) return null;
-
-  return { id: data.id, properties: data.properties };
+  return data?.id ? { id: data.id, properties: data.properties } : null;
 }
 
-/* ---------------- Rendering ---------------- */
-
-function renderDealSelectionPage(deals, currentUrl) {
-  const baseUrl = new URL(currentUrl);
-  baseUrl.search = "";
-
-  const cards = deals
-    .map((deal) => {
-      const p = deal.properties;
-      const name = p.dealname || "Program";
-
-      const amount = safeNumber(p.amount);
-      const amountStr = isNaN(amount)
-        ? ""
-        : `$${amount.toLocaleString("en-US", {
-            minimumFractionDigits: 2,
-            maximumFractionDigits: 2,
-          })}`;
-
-      const link = new URL(baseUrl.toString());
-      link.searchParams.set("dealId", deal.id);
-      link.searchParams.set("email", p.email || "");
-
-      return `
-      <a href="${link.toString()}" class="program-card">
-        <div class="program-name">${escapeHtml(name)}</div>
-        ${
-          amountStr
-            ? `<div class="program-amount">Program tuition: ${amountStr}</div>`
-            : ""
-        }
-        <div class="program-view">View payments →</div>
-      </a>`;
-    })
-    .join("");
-
-  return stripeStylePage(
-    "Select a Program",
-    `
-    <div class="container">
-      <h1>Select your program</h1>
-      <p>Please choose the program you'd like to view payments for.</p>
-      <div class="program-grid">${cards}</div>
-    </div>
-  `
-  );
-}
+/* ---------------------------------------------------
+   UI RENDERING
+--------------------------------------------------- */
 
 function renderDealPortal(deal) {
   const p = deal.properties;
-  const programName = p.dealname || "Your Program";
-
   const programFee = safeNumber(p.amount);
-  const totalPaidFromField = safeNumber(p.total_amount_paid);
+  const totalPaidField = safeNumber(p.total_amount_paid);
 
   const payments = [];
   PAYMENT_FIELDS.forEach((key) => {
@@ -366,57 +280,50 @@ function renderDealPortal(deal) {
     const parts = raw.split(",").map((s) => s.trim());
     const amt = safeNumber(parts[0]);
     if (!isNaN(amt)) {
-      payments.push({ amount: amt, date: parts[2], txn: parts[1] });
+      payments.push({
+        amount: amt,
+        txn: parts[1],
+        date: parts[2],
+      });
     }
   });
 
-  const totalPaid = !isNaN(totalPaidFromField)
-    ? totalPaidFromField
+  const totalPaid = !isNaN(totalPaidField)
+    ? totalPaidField
     : payments.reduce((s, p) => s + p.amount, 0);
 
-  const remaining =
-    !isNaN(programFee) && !isNaN(totalPaid) ? programFee - totalPaid : NaN;
+  const remaining = programFee - totalPaid;
 
   const depositTarget = 2500;
   const depositRemaining = Math.max(0, depositTarget - totalPaid);
 
-  const shouldShowAppFeeBtn = totalPaid === 0;
-  const shouldShowDepositBtn = totalPaid > 0 && totalPaid < 2250;
-  const hasRemaining = !isNaN(remaining) && remaining > 0;
+  const showAppFee = totalPaid === 0;
+  const showDeposit = totalPaid > 0 && totalPaid < 2250;
+  const hasRemaining = remaining > 0;
 
-  function feeBlock(base) {
-    if (isNaN(base) || base <= 0) return "";
-    const fee = base * 0.035;
-    const total = base + fee;
-    return `
-      <div class="fee-breakdown">
-        <div>Base: ${formatCurrency(base)}</div>
-        <div>Fee (3.5%): ${formatCurrency(fee)}</div>
-        <div><strong>Total: ${formatCurrency(total)}</strong></div>
-      </div>
-    `;
-  }
-
-  const paymentRows =
+  const rows =
     payments.length > 0
       ? payments
           .map(
-            (pay) => `
+            (p) => `
       <tr>
-        <td>${formatCurrency(pay.amount)}</td>
-        <td>${escapeHtml(pay.date || "")}</td>
-        <td>${escapeHtml(pay.txn || "")}</td>
-      </tr>`
+        <td>${formatCurrency(p.amount)}</td>
+        <td>${escapeHtml(p.date || "")}</td>
+        <td>${escapeHtml(p.txn || "")}</td>
+      </tr>
+    `
           )
           .join("")
       : `<tr><td colspan="3" class="empty-row">No payments yet.</td></tr>`;
 
-  const encodedDealId = encodeURIComponent(deal.id);
+  const encodedDeal = encodeURIComponent(deal.id);
   const encodedEmail = encodeURIComponent(p.email || "");
 
-  const content = `
+  return stripePage(
+    "Payment Summary",
+    `
     <div class="container">
-      <h1>${escapeHtml(programName)}</h1>
+      <h1>${escapeHtml(p.dealname || "Program")}</h1>
 
       <div class="summary-grid">
         <div class="summary-card">
@@ -424,7 +331,7 @@ function renderDealPortal(deal) {
           <div class="value">${formatCurrency(programFee)}</div>
         </div>
         <div class="summary-card">
-          <div class="label">Paid so far</div>
+          <div class="label">Paid So Far</div>
           <div class="value">${formatCurrency(totalPaid)}</div>
         </div>
         <div class="summary-card highlight">
@@ -433,88 +340,94 @@ function renderDealPortal(deal) {
         </div>
       </div>
 
-      ${
-        shouldShowAppFeeBtn
-          ? `
-      <div class="button-block">
-        <a href="?checkout=1&type=appfee&dealId=${encodedDealId}&email=${encodedEmail}"
-           class="btn btn-blue">
-          Pay Application Fee
-        </a>
-        ${feeBlock(250)}
-      </div>`
-          : ""
-      }
+      <!-- TWO-COLUMN PAYMENT AREA -->
+      <div class="payment-columns">
 
-      ${
-        shouldShowDepositBtn && hasRemaining
-          ? `
-      <div class="button-block">
-        <a href="?checkout=1&type=deposit&dealId=${encodedDealId}&email=${encodedEmail}"
-           class="btn btn-green">
-          Pay Deposit (${formatCurrency(depositRemaining)})
-        </a>
-        ${feeBlock(depositRemaining)}
-      </div>`
-          : ""
-      }
+        <!-- LEFT COLUMN -->
+        <div class="payment-left-column">
 
-      ${
-        hasRemaining
-          ? `
-      <div class="button-block">
-        <a href="?checkout=1&type=remaining&dealId=${encodedDealId}&email=${encodedEmail}"
-           class="btn btn-purple">
-          Pay Remaining Balance
-        </a>
-        ${feeBlock(remaining)}
-      </div>`
-          : `
-      <div class="button-block">
-        <div class="paid-message">
-          Your balance is fully paid. No further payment is due.
-        </div>
-      </div>`
-      }
+          ${
+            showAppFee
+              ? `
+        <div class="button-block">
+          <a class="btn btn-blue"
+             href="?checkout=1&type=appfee&dealId=${encodedDeal}&email=${encodedEmail}">
+            Pay Application Fee
+          </a>
+          ${feeBox(250)}
+        </div>`
+              : ""
+          }
 
-      ${
-        hasRemaining
-          ? `
-      <div class="custom-payment-wrapper">
-        <div class="custom-payment-card" id="custom-payment-section"
-             data-remaining="${remaining.toFixed(2)}">
+          ${
+            showDeposit && hasRemaining
+              ? `
+        <div class="button-block">
+          <a class="btn btn-green"
+             href="?checkout=1&type=deposit&dealId=${encodedDeal}&email=${encodedEmail}">
+            Pay Deposit (${formatCurrency(depositRemaining)})
+          </a>
+          ${feeBox(depositRemaining)}
+        </div>`
+              : ""
+          }
 
-          <h3 class="custom-title">Make a Payment</h3>
-          <p class="custom-description">
-            Choose an amount to pay toward your remaining balance.<br>
-            Minimum $250, up to your remaining balance.
-          </p>
-
-          <form id="custom-payment-form">
-            <label for="custom-amount">Amount in USD</label>
-            <input 
-              id="custom-amount" 
-              name="amount" 
-              type="number" 
-              step="0.01" 
-              min="250"
-              max="${remaining.toFixed(2)}"
-              placeholder="250.00" 
-              required
-            />
-            <button type="submit" class="btn btn-dark small-btn">
-              Make a Payment
-            </button>
-          </form>
-
-          <div id="custom-fee-summary" class="fee-breakdown small"></div>
-          <div id="custom-error" class="error-message"></div>
+          ${
+            hasRemaining
+              ? `
+        <div class="button-block">
+          <a class="btn btn-purple"
+             href="?checkout=1&type=remaining&dealId=${encodedDeal}&email=${encodedEmail}">
+            Pay Remaining Balance
+          </a>
+          ${feeBox(remaining)}
+        </div>`
+              : `
+        <div class="button-block">
+          <div class="paid-message">Your balance is fully paid.</div>
+        </div>`
+          }
 
         </div>
+
+        <!-- RIGHT COLUMN: CUSTOM PAYMENT CARD -->
+        ${
+          hasRemaining
+            ? `
+        <div class="payment-right-column">
+          <div class="custom-payment-card"
+               id="custom-payment-section"
+               data-remaining="${remaining}">
+
+            <h3 class="custom-title">Make a Payment</h3>
+            <p class="custom-description">
+              Choose an amount to pay toward your remaining balance.<br>
+              Minimum $250, up to your remaining balance.
+            </p>
+
+            <form id="custom-payment-form">
+              <label for="custom-amount">Amount in USD</label>
+              <input type="number"
+                     id="custom-amount"
+                     min="250"
+                     max="${remaining}"
+                     step="0.01"
+                     placeholder="250.00"
+                     required/>
+              <button class="btn btn-dark small-btn" type="submit">
+                Make a Payment
+              </button>
+            </form>
+
+            <div id="custom-fee-summary" class="fee-breakdown small"></div>
+            <div id="custom-error" class="error-message"></div>
+
+          </div>
+        </div>`
+            : ""
+        }
+
       </div>
-      `
-          : ""
-      }
 
       <div class="section">
         <h2>Payment History</h2>
@@ -527,334 +440,307 @@ function renderDealPortal(deal) {
                 <th>Transaction</th>
               </tr>
             </thead>
-            <tbody>${paymentRows}</tbody>
+            <tbody>${rows}</tbody>
           </table>
         </div>
       </div>
     </div>
 
-    ${
-      hasRemaining
-        ? `<script>
-    (function() {
-      const section = document.getElementById('custom-payment-section');
-      if (!section) return;
-      const remaining = parseFloat(section.dataset.remaining || '0') || 0;
-      const form = document.getElementById('custom-payment-form');
-      const input = document.getElementById('custom-amount');
-      const feeSummary = document.getElementById('custom-fee-summary');
-      const errorEl = document.getElementById('custom-error');
-
-      function formatCurrency(num) {
-        if (isNaN(num)) return '—';
-        return '$' + num.toLocaleString('en-US', {
-          minimumFractionDigits: 2,
-          maximumFractionDigits: 2
-        });
-      }
-
-      function updateSummary() {
-        const val = parseFloat(input.value || '0');
-        errorEl.textContent = '';
-        if (isNaN(val) || val <= 0) {
-          feeSummary.textContent = '';
-          return;
-        }
-        const base = val;
-        const fee = base * 0.035;
-        const total = base + fee;
-        feeSummary.innerHTML =
-          '<div>Base: ' + formatCurrency(base) + '</div>' +
-          '<div>Fee (3.5%): ' + formatCurrency(fee) + '</div>' +
-          '<div><strong>Total: ' + formatCurrency(total) + '</strong></div>';
-      }
-
-      input.addEventListener('input', updateSummary);
-
-      form.addEventListener('submit', function(e) {
-        e.preventDefault();
-        errorEl.textContent = '';
-        const val = parseFloat(input.value || '0');
-
-        if (isNaN(val)) {
-          errorEl.textContent = 'Please enter a valid amount.';
-          return;
-        }
-        if (val < 250) {
-          errorEl.textContent = 'Minimum payment is $250 USD.';
-          return;
-        }
-        if (val - remaining > 0.01) {
-          errorEl.textContent = 'Amount cannot exceed remaining balance.';
-          return;
-        }
-
-        const params = new URLSearchParams(window.location.search);
-        params.set('checkout', '1');
-        params.set('type', 'custom');
-        params.set('amount', val.toFixed(2));
-        window.location.search = params.toString();
-      });
-
-      updateSummary();
-    })();
-    </script>`
-        : ""
-    }
-  `;
-
-  return stripeStylePage("Payment Summary", content);
+    ${hasRemaining ? customPaymentScript() : ""}
+  `
+  );
 }
 
-/* ---------------- Utilities ---------------- */
+/* ---------------------------------------------------
+   UI HELPERS
+--------------------------------------------------- */
 
-function stripeStylePage(title, content) {
-  return `<!DOCTYPE html>
+function feeBox(base) {
+  const fee = base * 0.035;
+  const total = base + fee;
+  return `
+    <div class="fee-breakdown">
+      <div>Base: ${formatCurrency(base)}</div>
+      <div>Fee (3.5%): ${formatCurrency(fee)}</div>
+      <div><strong>Total: ${formatCurrency(total)}</strong></div>
+    </div>
+  `;
+}
+
+function customPaymentScript() {
+  return `
+<script>
+(function(){
+  const section = document.getElementById('custom-payment-section');
+  if(!section) return;
+
+  const max = parseFloat(section.dataset.remaining);
+  const input = document.getElementById('custom-amount');
+  const form = document.getElementById('custom-payment-form');
+  const feeBox = document.getElementById('custom-fee-summary');
+  const err = document.getElementById('custom-error');
+
+  function fmt(n){
+    return '$' + n.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});
+  }
+
+  function update(){
+    err.textContent = '';
+    const v = parseFloat(input.value || '0');
+    if(!v || v < 250){ feeBox.textContent = ''; return; }
+    if(v > max){ feeBox.textContent=''; return; }
+    const fee = v * 0.035;
+    const total = v + fee;
+    feeBox.innerHTML = 
+      '<div>Base: '+fmt(v)+'</div>'+
+      '<div>Fee (3.5%): '+fmt(fee)+'</div>'+
+      '<div><strong>Total: '+fmt(total)+'</strong></div>';
+  }
+
+  form.addEventListener('submit', e=>{
+    e.preventDefault();
+    err.textContent='';
+    const v = parseFloat(input.value || '0');
+    if(v < 250){ err.textContent='Minimum payment is $250.'; return; }
+    if(v > max){ err.textContent='Amount exceeds remaining balance.'; return; }
+
+    const params = new URLSearchParams(window.location.search);
+    params.set('checkout','1');
+    params.set('type','custom');
+    params.set('amount',v.toFixed(2));
+    window.location.search = params.toString();
+  });
+
+  input.addEventListener('input',update);
+})();
+</script>
+`;
+}
+
+/* ---------------------------------------------------
+   PAGE WRAPPER
+--------------------------------------------------- */
+
+function stripePage(title, body) {
+  return `
+<!DOCTYPE html>
 <html>
 <head>
-  <meta charset="UTF-8"/>
-  <meta name="viewport" content="width=device-width, initial-scale=1"/>
-  <title>${escapeHtml(title)}</title>
-  <style>
-    body {
-      font-family: system-ui, -apple-system, BlinkMacSystemFont, "SF Pro Text",
-        "Segoe UI", sans-serif;
-      background:#f3f4f6;
-      margin:0;
-    }
-    .container {
-      max-width: 720px;
-      margin: 40px auto;
-      padding: 24px;
-      background: #ffffff;
-      border-radius: 16px;
-      box-shadow: 0 18px 45px rgba(15,23,42,0.12);
-    }
-    h1 { margin: 0 0 12px; font-size: 1.6rem; }
-    h2 { margin-top: 24px; margin-bottom: 8px; font-size: 1.1rem; }
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>${escapeHtml(title)}</title>
+<style>
 
-    .summary-grid {
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
-      gap: 12px;
-      margin-bottom: 24px;
-    }
-    .summary-card {
-      padding: 14px;
-      border-radius: 12px;
-      border: 1px solid #e5e7eb;
-      background: #fff;
-    }
-    .summary-card.highlight {
-      border-color:#4f46e5;
-      background: radial-gradient(circle at top left, #eef2ff, #f9fafb);
-    }
-    .label {
-      font-size: 0.75rem;
-      text-transform: uppercase;
-      letter-spacing: 0.08em;
-      color:#6b7280;
-      margin-bottom: 4px;
-    }
-    .value {
-      font-size: 1.1rem;
-      font-weight: 600;
-      color:#111827;
-    }
+/* Base Styles */
+body {
+  font-family: system-ui, -apple-system, BlinkMacSystemFont, "SF Pro Text",
+    "Segoe UI", sans-serif;
+  background: #f3f4f6;
+  margin: 0;
+}
+.container {
+  max-width: 720px;
+  margin: 40px auto;
+  padding: 24px;
+  background: white;
+  border-radius: 16px;
+  box-shadow: 0 18px 45px rgba(15,23,42,0.12);
+}
+h1 { margin: 0 0 12px; font-size: 1.6rem; }
 
-    .button-block { margin: 18px 0; }
-    .btn {
-      display:inline-block;
-      padding: 10px 18px;
-      border-radius: 999px;
-      text-decoration:none;
-      font-weight:600;
-      font-size:0.95rem;
-      border:none;
-      cursor:pointer;
-    }
-    .btn-blue { background:#3b82f6; color:white; }
-    .btn-green { background:#10b981; color:white; }
-    .btn-purple { background:#4f46e5; color:white; }
-    .btn-dark { background:#111827; color:white; }
-    .small-btn { padding: 8px 12px; border-radius: 8px; font-size: 0.85rem; }
+/* Summary Cards */
+.summary-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit,minmax(160px,1fr));
+  gap: 12px;
+  margin-bottom: 24px;
+}
+.summary-card {
+  padding: 14px;
+  border-radius: 12px;
+  border: 1px solid #e5e7eb;
+  background: white;
+}
+.summary-card.highlight {
+  border-color: #4f46e5;
+  background: radial-gradient(circle at top left,#eef2ff,#f9fafb);
+}
+.label {
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: #6b7280;
+  margin-bottom: 4px;
+}
+.value {
+  font-size: 1.1rem;
+  font-weight: 600;
+}
 
-    .fee-breakdown {
-      margin-top: 6px;
-      font-size: 0.85rem;
-      color:#4b5563;
-      line-height:1.4;
-    }
-    .fee-breakdown.small { font-size:0.8rem; }
+/* Payment columns */
+.payment-columns {
+  display: grid;
+  grid-template-columns: 1fr 280px;
+  gap: 24px;
+  align-items: start;
+  margin-top: 20px;
+}
+.payment-left-column {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+.payment-right-column {
+  display: flex;
+  justify-content: flex-end;
+}
 
-    .section { margin-top: 24px; }
+/* Buttons */
+.button-block { margin-bottom: 10px; }
+.btn {
+  display: inline-block;
+  padding: 10px 18px;
+  border-radius: 999px;
+  font-weight: 600;
+  text-decoration: none;
+  color: white;
+}
+.btn-blue { background: #3b82f6; }
+.btn-green { background: #10b981; }
+.btn-purple { background: #4f46e5; }
+.btn-dark { background:#111827; }
+.small-btn { padding: 8px 12px; border-radius: 8px; }
 
-    .table-wrapper {
-      margin-top: 10px;
-      border-radius: 12px;
-      border: 1px solid #e5e7eb;
-      overflow: hidden;
-      background:#fff;
-    }
-    table { width:100%; border-collapse: collapse; font-size:0.9rem; }
-    th, td {
-      padding: 10px 12px;
-      border-bottom:1px solid #e5e7eb;
-      text-align:left;
-    }
-    th {
-      background:#f9fafb;
-      font-size:0.8rem;
-      text-transform:uppercase;
-      letter-spacing:0.06em;
-      color:#4b5563;
-    }
-    .empty-row { text-align:center; color:#9ca3af; font-style:italic; }
+/* Custom Payment Card */
+.custom-payment-card {
+  width: 100%;
+  padding: 18px;
+  border-radius: 14px;
+  border: 1px solid #e5e7eb;
+  background: #fafafa;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.05);
+}
+.custom-title {
+  margin: 0 0 8px;
+  font-size: 1.05rem;
+  font-weight: 600;
+}
+.custom-description {
+  margin: 0 0 14px;
+  font-size: 0.85rem;
+  color: #4b5563;
+}
+label { display: block; margin-bottom: 5px; font-size: 0.9rem; }
+input[type="number"]{
+  width: 100%;
+  padding: 8px;
+  border-radius: 8px;
+  border: 1px solid #d1d5db;
+  font-size: 0.95rem;
+  margin-bottom: 8px;
+}
+input:focus {
+  outline: none;
+  border-color: #4f46e5;
+  box-shadow: 0 0 0 1px #4f46e5;
+}
+.error-message { color:#b91c1c; font-size: 0.85rem; }
 
-    .program-grid {
-      display:grid;
-      grid-template-columns:1fr;
-      gap:12px;
-    }
-    .program-card {
-      display:block;
-      padding:14px 16px;
-      border-radius:12px;
-      border:1px solid #e5e7eb;
-      background:#fff;
-      text-decoration:none;
-      color:inherit;
-      transition: box-shadow 0.15s ease, transform 0.15s ease, border-color 0.15s ease;
-    }
-    .program-card:hover {
-      transform: translateY(-1px);
-      border-color:#4f46e5;
-      box-shadow:0 12px 24px rgba(15,23,42,0.12);
-    }
+/* Fee breakdown */
+.fee-breakdown {
+  margin-top: 6px;
+  font-size: 0.85rem;
+  color:#4b5563;
+}
+.fee-breakdown.small { font-size:0.8rem; }
 
-    label {
-      display:block;
-      font-size:0.9rem;
-      margin-bottom:4px;
-      color:#374151;
-    }
-    input[type="number"] {
-      width:100%;
-      padding:8px 10px;
-      border-radius:8px;
-      border:1px solid #d1d5db;
-      font-size:0.95rem;
-      box-sizing:border-box;
-      margin-bottom:8px;
-    }
-    input[type="number"]:focus {
-      outline:none;
-      border-color:#4f46e5;
-      box-shadow:0 0 0 1px #4f46e5;
-    }
-    .error-message {
-      color:#b91c1c;
-      font-size:0.8rem;
-      margin-top:4px;
-    }
-    .paid-message {
-      font-size:0.95rem;
-      color:#16a34a;
-      font-weight:500;
-    }
+/* History table */
+.table-wrapper {
+  margin-top: 20px;
+  border-radius: 12px;
+  border:1px solid #e5e7eb;
+  overflow: hidden;
+}
+table { width:100%; border-collapse: collapse; }
+th,td {
+  padding:10px;
+  border-bottom:1px solid #e5e7eb;
+}
+th {
+  background:#f9fafb;
+  font-size:0.8rem;
+  color:#4b5563;
+  text-transform: uppercase;
+  letter-spacing:0.06em;
+}
+.empty-row {
+  text-align:center;
+  color:#9ca3af;
+  font-style:italic;
+}
 
-    /* Right-side custom payment block */
-    .custom-payment-wrapper {
-      display: flex;
-      justify-content: flex-end;
-      margin-top: 30px;
-    }
+/* Mobile Responsive */
+@media(max-width:900px){
+  .payment-columns {
+    grid-template-columns: 1fr;
+  }
+  .payment-right-column {
+    justify-content: center;
+  }
+}
 
-    .custom-payment-card {
-      width: 280px;
-      padding: 18px;
-      border-radius: 14px;
-      border: 1px solid #e5e7eb;
-      background: #fafafa;
-      box-shadow: 0 4px 12px rgba(0,0,0,0.05);
-    }
-
-    .custom-title {
-      margin: 0 0 8px 0;
-      font-size: 1.05rem;
-      font-weight: 600;
-    }
-
-    .custom-description {
-      margin: 0 0 14px 0;
-      font-size: 0.85rem;
-      color: #4b5563;
-    }
-
-    /* Responsive: full-width on mobile */
-    @media (max-width: 768px) {
-      .container {
-        margin:16px;
-        padding:18px;
-      }
-
-      .custom-payment-wrapper {
-        justify-content: center;
-      }
-
-      .custom-payment-card {
-        width: 100%;
-      }
-    }
-  </style>
+</style>
 </head>
 <body>
-${content}
+${body}
 </body>
-</html>`;
+</html>
+`;
 }
+
+/* ---------------------------------------------------
+   UTILITIES
+--------------------------------------------------- */
 
 function safeNumber(val) {
-  if (val === null || val === undefined || val === "") return NaN;
-  const num = Number(val);
-  return isNaN(num) ? NaN : num;
+  const n = Number(val);
+  return isNaN(n) ? NaN : n;
 }
 
-function formatCurrency(num) {
-  if (isNaN(num)) return "—";
-  return `$${num.toLocaleString("en-US", {
-    minimumFractionDigits: 2,
-    maximumFractionDigits: 2,
-  })}`;
+function formatCurrency(n) {
+  return isNaN(n)
+    ? "—"
+    : "$" +
+        n.toLocaleString("en-US", {
+          minimumFractionDigits: 2,
+          maximumFractionDigits: 2,
+        });
 }
 
-function escapeHtml(s) {
-  return String(s || "")
+function escapeHtml(str) {
+  return String(str)
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;");
 }
 
-function textResponse(code, text) {
+function textResponse(code, msg) {
   return {
     statusCode: code,
-    headers: { "Content-Type": "text/plain; charset=utf-8" },
-    body: text,
+    headers: { "Content-Type": "text/plain" },
+    body: msg,
   };
 }
 
 function htmlResponse(code, html) {
   return {
     statusCode: code,
-    headers: { "Content-Type": "text/html; charset=utf-8" },
+    headers: { "Content-Type": "text/html" },
     body: html,
   };
 }
 
-function basicPage(title, contentHtml) {
-  return stripeStylePage(
-    title,
-    `<div class="container"><h1>${escapeHtml(title)}</h1>${contentHtml}</div>`
-  );
+function basicPage(title, html) {
+  return stripePage(title, `<div class="container">${html}</div>`);
 }
