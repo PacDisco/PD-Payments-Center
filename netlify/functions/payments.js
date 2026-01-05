@@ -182,25 +182,9 @@ function renderDealPortal(deal) {
 
 <div class="payment-layout">
   <div class="actions">
-
-    ${
-      totalPaid === 0
-        ? presetButton(deal.id, "Pay Application Fee", "appfee", 250)
-        : ""
-    }
-
-    ${
-      totalPaid > 0 && totalPaid < 2250
-        ? presetButton(deal.id, "Pay Deposit", "deposit", depositRemaining)
-        : ""
-    }
-
-    ${
-      remaining > 0
-        ? presetButton(deal.id, "Pay Remaining Balance", "remaining", remaining)
-        : `<strong>Your balance is fully paid.</strong>`
-    }
-
+    ${totalPaid === 0 ? presetButton(deal.id, "Pay Application Fee", "appfee", 250) : ""}
+    ${totalPaid > 0 && totalPaid < 2250 ? presetButton(deal.id, "Pay Deposit", "deposit", depositRemaining) : ""}
+    ${remaining > 0 ? presetButton(deal.id, "Pay Remaining Balance", "remaining", remaining) : "<strong>Paid in full</strong>"}
   </div>
 
   ${
@@ -208,12 +192,13 @@ function renderDealPortal(deal) {
       ? `
   <div class="custom-card">
     <h3>Make a Payment</h3>
-    <p class="sub">
-      Minimum $250, up to your remaining balance.
-    </p>
+    <p class="sub">Minimum $250, up to your remaining balance.</p>
+
     <input id="customAmount" type="number" min="250" max="${remaining}" step="0.01" placeholder="250.00">
+    <div id="customError" class="error"></div>
     <div id="customCalc" class="calc"></div>
-    <button onclick="customPay()">Make a Payment</button>
+
+    <button id="customPayBtn" disabled onclick="customPay()">Make a Payment</button>
   </div>`
       : ""
   }
@@ -238,29 +223,51 @@ function renderDealPortal(deal) {
 <script>
 const input = document.getElementById('customAmount');
 const calc = document.getElementById('customCalc');
+const err = document.getElementById('customError');
+const btn = document.getElementById('customPayBtn');
+const MAX = ${remaining};
+
+function fmt(n){ return '$' + n.toLocaleString('en-US',{minimumFractionDigits:2}); }
 
 if(input){
   input.addEventListener('input',()=>{
-    const v = parseFloat(input.value||0);
-    if(v < 250 || v > ${remaining}){ calc.textContent=''; return; }
+    const v = parseFloat(input.value);
+    err.textContent = '';
+    calc.textContent = '';
+    btn.disabled = true;
+
+    if(isNaN(v)){
+      err.textContent = 'Please enter an amount.';
+      return;
+    }
+    if(v < 250){
+      err.textContent = 'Minimum payment is $250.';
+      return;
+    }
+    if(v > MAX){
+      err.textContent = 'Amount cannot exceed your remaining balance.';
+      return;
+    }
+
     const fee = v * 0.035;
     calc.innerHTML =
       'Base ' + fmt(v) +
       ' | Fee ' + fmt(fee) +
       ' | <strong>Total ' + fmt(v+fee) + '</strong>';
+
+    btn.disabled = false;
   });
 }
 
 function customPay(){
-  const v = parseFloat(input.value||0);
-  if(v < 250 || v > ${remaining}) return alert('Invalid amount');
+  const v = parseFloat(input.value);
+  if(isNaN(v) || v < 250 || v > MAX) return;
   const p = new URLSearchParams(location.search);
   p.set('checkout','1');
   p.set('type','custom');
   p.set('amount',v.toFixed(2));
   location.search = p.toString();
 }
-function fmt(n){ return '$' + n.toLocaleString('en-US',{minimumFractionDigits:2}); }
 </script>
 `);
 }
@@ -323,8 +330,10 @@ body{font-family:system-ui;background:#f3f4f6;margin:0}
 .pay-block{margin-bottom:18px}
 .fee{font-size:.85rem;color:#4b5563;margin-top:4px}
 .calc{font-size:.85rem;color:#374151;margin:6px 0}
+.error{font-size:.85rem;color:#b91c1c;margin:4px 0}
 .btn{display:inline-block;padding:10px 18px;border-radius:999px;background:#4f46e5;color:#fff;text-decoration:none;font-weight:600}
 button{padding:10px 14px;border-radius:10px;border:none;background:#111827;color:#fff;font-weight:600;cursor:pointer}
+button:disabled{opacity:.5;cursor:not-allowed}
 .payment-disclaimer{margin:28px 0 16px;padding-top:14px;border-top:1px solid #e5e7eb;font-size:.85rem;color:#4b5563}
 table{width:100%;border-collapse:collapse}
 th,td{padding:12px;border-bottom:1px solid #e5e7eb}
