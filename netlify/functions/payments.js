@@ -49,7 +49,7 @@ exports.handler = async (event) => {
       const p = deal.properties || {};
       const programName = p.dealname || "Program payment";
 
-      // Get base financials
+      // Base financials
       const programFee = safeNumber(p.amount);
       const totalPaidFromField = safeNumber(p.total_amount_paid);
 
@@ -66,33 +66,61 @@ exports.handler = async (event) => {
         ? totalPaidFromField
         : payments.reduce((sum, pay) => sum + pay.amount, 0);
 
-      const remaining = programFee - totalPaid;
+      const remaining =
+        !isNaN(programFee) && !isNaN(totalPaid) ? programFee - totalPaid : NaN;
 
-      // Deposit rules
+      if (isNaN(remaining)) {
+        return textResponse(
+          400,
+          "Unable to determine remaining balance for this program."
+        );
+      }
+
       const depositTarget = 2500;
       const depositRemaining = Math.max(0, depositTarget - totalPaid);
 
-      // Determine charge type
-      const type = url.searchParams.get("type"); // remaining | deposit | appfee
+      // Determine payment type
+      const type = url.searchParams.get("type") || "remaining"; // remaining | deposit | appfee | custom
       let baseAmount = 0;
-      let description = "";
+      let descriptionLabel = "";
 
       if (type === "appfee") {
         baseAmount = 250;
-        description = "Application Fee";
+        descriptionLabel = "Application Fee";
       } else if (type === "deposit") {
         baseAmount = depositRemaining;
-        description = "Program Deposit";
+        descriptionLabel = "Program Deposit";
+      } else if (type === "custom") {
+        const customRaw = url.searchParams.get("amount");
+        const customAmount = safeNumber(customRaw);
+        if (isNaN(customAmount)) {
+          return textResponse(400, "Invalid custom payment amount.");
+        }
+        if (customAmount < 250) {
+          return textResponse(
+            400,
+            "Minimum custom payment amount is $250 USD."
+          );
+        }
+        if (customAmount - remaining > 0.01) {
+          return textResponse(
+            400,
+            "Custom payment amount cannot exceed remaining balance."
+          );
+        }
+        baseAmount = customAmount;
+        descriptionLabel = "Custom Payment";
       } else {
+        // Remaining balance
         baseAmount = remaining;
-        description = "Remaining Program Balance";
+        descriptionLabel = "Remaining Program Balance";
       }
 
       if (isNaN(baseAmount) || baseAmount <= 0) {
-        return textResponse(400, "No outstanding balance to pay.");
+        return textResponse(400, "There is no outstanding balance to pay.");
       }
 
-      // Add 3.5% fee to ALL payments
+      // 3.5% fee for ALL payments
       const feeAmount = baseAmount * 0.035;
       const totalWithFee = baseAmount + feeAmount;
 
@@ -102,6 +130,8 @@ exports.handler = async (event) => {
       const cancelUrl = new URL(baseUrl.toString());
       cancelUrl.searchParams.set("dealId", dealId);
       if (email) cancelUrl.searchParams.set("email", email);
+
+      const description = `${descriptionLabel} – Deal ID: ${dealId}`;
 
       const session = await stripe.checkout.sessions.create({
         mode: "payment",
@@ -113,7 +143,7 @@ exports.handler = async (event) => {
               currency: "usd",
               product_data: {
                 name: programName,
-                description: `${description} (includes 3.5% transaction fee)`,
+                description,
               },
               unit_amount: Math.round(totalWithFee * 100),
             },
@@ -123,6 +153,10 @@ exports.handler = async (event) => {
         success_url:
           "https://pacificdiscovery.org/success?session_id={CHECKOUT_SESSION_ID}",
         cancel_url: cancelUrl.toString(),
+        metadata: {
+          dealId: String(dealId),
+          paymentType: type,
+        },
       });
 
       return {
@@ -173,7 +207,7 @@ exports.handler = async (event) => {
         404,
         basicPage(
           "No programs found",
-          `<p>We found your contact but no payment records yet.</p>`
+          `<p>We found your contact but no program payment records yet.</p>`
         )
       );
     }
@@ -218,7 +252,11 @@ async function findContactByEmail(email) {
   const data = await hubSpotFetch("/crm/v3/objects/contacts/search", {
     method: "POST",
     body: JSON.stringify({
-      filterGroups: [{ filters: [{ propertyName: "email", operator: "EQ", value: email }] }],
+      filterGroups: [
+        {
+          filters: [{ propertyName: "email", operator: "EQ", value: email }],
+        },
+      ],
       properties: ["email", "firstname", "lastname"],
       limit: 1,
     }),
@@ -234,7 +272,8 @@ async function getDealsForContact(contactId) {
     `/crm/v4/objects/contacts/${contactId}/associations/deals`
   );
 
-  const dealIds = assocData.results?.map((r) => r.toObjectId).filter(Boolean) || [];
+  const dealIds =
+    assocData.results?.map((r) => r.toObjectId).filter(Boolean) || [];
   if (!dealIds.length) return [];
 
   const batch = await hubSpotFetch("/crm/v3/objects/deals/batch/read", {
@@ -245,10 +284,12 @@ async function getDealsForContact(contactId) {
     }),
   });
 
-  return batch.results?.map((d) => ({
-    id: d.id,
-    properties: { ...d.properties, email: contactEmailGlobal },
-  })) ?? [];
+  return (
+    batch.results?.map((d) => ({
+      id: d.id,
+      properties: { ...d.properties, email: contactEmailGlobal },
+    })) ?? []
+  );
 }
 
 async function getDealById(dealId) {
@@ -289,7 +330,11 @@ function renderDealSelectionPage(deals, currentUrl) {
       return `
       <a href="${link.toString()}" class="program-card">
         <div class="program-name">${escapeHtml(name)}</div>
-        ${amountStr ? `<div class="program-amount">Program fee: ${amountStr}</div>` : ""}
+        ${
+          amountStr
+            ? `<div class="program-amount">Program tuition: ${amountStr}</div>`
+            : ""
+        }
         <div class="program-view">View payments →</div>
       </a>`;
     })
@@ -329,28 +374,31 @@ function renderDealPortal(deal) {
     ? totalPaidFromField
     : payments.reduce((s, p) => s + p.amount, 0);
 
-  const remaining = programFee - totalPaid;
+  const remaining =
+    !isNaN(programFee) && !isNaN(totalPaid) ? programFee - totalPaid : NaN;
 
   const depositTarget = 2500;
   const depositRemaining = Math.max(0, depositTarget - totalPaid);
 
   const shouldShowAppFeeBtn = totalPaid === 0;
   const shouldShowDepositBtn = totalPaid > 0 && totalPaid < 2250;
+  const hasRemaining = !isNaN(remaining) && remaining > 0;
 
   function feeBlock(base) {
+    if (isNaN(base) || base <= 0) return "";
     const fee = base * 0.035;
     const total = base + fee;
     return `
-      <div style="margin-top:6px; font-size:0.85rem; color:#555;">
-        Base: ${formatCurrency(base)}<br>
-        Fee (3.5%): ${formatCurrency(fee)}<br>
-        <strong>Total: ${formatCurrency(total)}</strong>
+      <div class="fee-breakdown">
+        <div>Base: ${formatCurrency(base)}</div>
+        <div>Fee (3.5%): ${formatCurrency(fee)}</div>
+        <div><strong>Total: ${formatCurrency(total)}</strong></div>
       </div>
     `;
   }
 
   const paymentRows =
-    payments.length
+    payments.length > 0
       ? payments
           .map(
             (pay) => `
@@ -363,24 +411,34 @@ function renderDealPortal(deal) {
           .join("")
       : `<tr><td colspan="3" class="empty-row">No payments yet.</td></tr>`;
 
-  return stripeStylePage(
-    "Payment Summary",
-    `
+  // Main page HTML
+  const content = `
     <div class="container">
       <h1>${escapeHtml(programName)}</h1>
 
       <div class="summary-grid">
-        <div class="summary-card"><div class="label">Program fee</div><div class="value">${formatCurrency(programFee)}</div></div>
-        <div class="summary-card"><div class="label">Paid so far</div><div class="value">${formatCurrency(totalPaid)}</div></div>
-        <div class="summary-card highlight"><div class="label">Remaining Balance</div><div class="value">${formatCurrency(remaining)}</div></div>
+        <div class="summary-card">
+          <div class="label">Program Tuition</div>
+          <div class="value">${formatCurrency(programFee)}</div>
+        </div>
+        <div class="summary-card">
+          <div class="label">Paid so far</div>
+          <div class="value">${formatCurrency(totalPaid)}</div>
+        </div>
+        <div class="summary-card highlight">
+          <div class="label">Remaining Balance</div>
+          <div class="value">${formatCurrency(remaining)}</div>
+        </div>
       </div>
 
       ${
         shouldShowAppFeeBtn
           ? `
-      <div style="margin:20px 0;">
-        <a href="?checkout=1&type=appfee&dealId=${deal.id}&email=${p.email}"
-           style="background:#3b82f6;color:white;padding:12px 20px;border-radius:8px;display:inline-block;font-weight:600;">
+      <div class="button-block">
+        <a href="?checkout=1&type=appfee&dealId=${encodeURIComponent(
+          deal.id
+        )}&email=${encodeURIComponent(p.email || "")}"
+           class="btn btn-blue">
           Pay Application Fee
         </a>
         ${feeBlock(250)}
@@ -389,11 +447,13 @@ function renderDealPortal(deal) {
       }
 
       ${
-        shouldShowDepositBtn
+        shouldShowDepositBtn && hasRemaining
           ? `
-      <div style="margin:20px 0;">
-        <a href="?checkout=1&type=deposit&dealId=${deal.id}&email=${p.email}"
-           style="background:#10b981;color:white;padding:12px 20px;border-radius:8px;display:inline-block;font-weight:600;">
+      <div class="button-block">
+        <a href="?checkout=1&type=deposit&dealId=${encodeURIComponent(
+          deal.id
+        )}&email=${encodeURIComponent(p.email || "")}"
+           class="btn btn-green">
           Pay Deposit (${formatCurrency(depositRemaining)})
         </a>
         ${feeBlock(depositRemaining)}
@@ -401,56 +461,332 @@ function renderDealPortal(deal) {
           : ""
       }
 
-      <div style="margin:20px 0;">
-        <a href="?checkout=1&type=remaining&dealId=${deal.id}&email=${p.email}"
-           style="background:#4f46e5;color:white;padding:12px 20px;border-radius:8px;display:inline-block;font-weight:600;">
+      ${
+        hasRemaining
+          ? `
+      <div class="button-block">
+        <a href="?checkout=1&type=remaining&dealId=${encodeURIComponent(
+          deal.id
+        )}&email=${encodeURIComponent(p.email || "")}"
+           class="btn btn-purple">
           Pay Remaining Balance
         </a>
         ${feeBlock(remaining)}
+      </div>`
+          : `
+      <div class="button-block">
+        <div class="paid-message">
+          Your balance is fully paid. No further payment is due.
+        </div>
+      </div>`
+      }
+
+      ${
+        hasRemaining
+          ? `
+      <div class="section" id="custom-payment-section"
+           data-remaining="${remaining.toFixed(2)}">
+        <h2>Make a Payment</h2>
+        <p>You can choose an amount to pay toward your remaining balance (minimum $250, up to your remaining balance).</p>
+        <form id="custom-payment-form">
+          <label for="custom-amount">Amount in USD</label>
+          <input 
+            id="custom-amount" 
+            name="amount" 
+            type="number" 
+            step="0.01" 
+            min="250"
+            max="${remaining.toFixed(2)}"
+            placeholder="250.00" 
+            required
+          />
+          <button type="submit" class="btn btn-dark">
+            Make a Payment
+          </button>
+        </form>
+        <div id="custom-fee-summary" class="fee-breakdown small"></div>
+        <div id="custom-error" class="error-message"></div>
       </div>
+      `
+          : ""
+      }
 
       <div class="section">
         <h2>Payment History</h2>
         <div class="table-wrapper">
-          <table><thead><tr><th>Amount</th><th>Date</th><th>Transaction</th></tr></thead><tbody>${paymentRows}</tbody></table>
+          <table>
+            <thead>
+              <tr>
+                <th>Amount</th>
+                <th>Date</th>
+                <th>Transaction</th>
+              </tr>
+            </thead>
+            <tbody>${paymentRows}</tbody>
+          </table>
         </div>
       </div>
     </div>
-  `
-  );
+
+    ${
+      hasRemaining
+        ? `<script>
+    (function() {
+      const section = document.getElementById('custom-payment-section');
+      if (!section) return;
+      const remaining = parseFloat(section.dataset.remaining || '0') || 0;
+      const form = document.getElementById('custom-payment-form');
+      const input = document.getElementById('custom-amount');
+      const feeSummary = document.getElementById('custom-fee-summary');
+      const errorEl = document.getElementById('custom-error');
+
+      function formatCurrency(num) {
+        if (isNaN(num)) return '—';
+        return '$' + num.toLocaleString('en-US', {
+          minimumFractionDigits: 2,
+          maximumFractionDigits: 2
+        });
+      }
+
+      function updateSummary() {
+        const val = parseFloat(input.value || '0');
+        errorEl.textContent = '';
+        if (isNaN(val) || val <= 0) {
+          feeSummary.textContent = '';
+          return;
+        }
+        const base = val;
+        const fee = base * 0.035;
+        const total = base + fee;
+        feeSummary.innerHTML =
+          '<div>Base: ' + formatCurrency(base) + '</div>' +
+          '<div>Fee (3.5%): ' + formatCurrency(fee) + '</div>' +
+          '<div><strong>Total: ' + formatCurrency(total) + '</strong></div>';
+      }
+
+      input.addEventListener('input', updateSummary);
+
+      form.addEventListener('submit', function(e) {
+        e.preventDefault();
+        errorEl.textContent = '';
+        const val = parseFloat(input.value || '0');
+
+        if (isNaN(val)) {
+          errorEl.textContent = 'Please enter a valid amount.';
+          return;
+        }
+        if (val < 250) {
+          errorEl.textContent = 'Minimum payment is $250 USD.';
+          return;
+        }
+        if (val - remaining > 0.01) {
+          errorEl.textContent = 'Amount cannot exceed remaining balance.';
+          return;
+        }
+
+        const params = new URLSearchParams(window.location.search);
+        params.set('checkout', '1');
+        params.set('type', 'custom');
+        params.set('amount', val.toFixed(2));
+        window.location.search = params.toString();
+      });
+
+      updateSummary();
+    })();
+    </script>`
+        : ""
+    }
+  `;
+
+  return stripeStylePage("Payment Summary", content);
 }
 
 /* ---------------- Utilities ---------------- */
 
 function stripeStylePage(title, content) {
-  return `<!DOCTYPE html><html><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><title>${title}</title>
-<style>
-body{font-family:sans-serif;background:#f3f4f6;margin:0;}
-.container{max-width:720px;margin:40px auto;padding:24px;background:white;border-radius:16px;box-shadow:0 8px 30px rgba(0,0,0,0.1);}
-.summary-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:12px;margin-bottom:24px;}
-.summary-card{padding:14px;border:1px solid #e5e7eb;border-radius:12px;}
-.summary-card.highlight{border-color:#4f46e5;}
-.label{text-transform:uppercase;font-size:0.7rem;color:#6b7280;margin-bottom:4px;}
-.value{font-size:1.2rem;font-weight:600;}
-.table-wrapper{margin-top:20px;}
-table{width:100%;border-collapse:collapse;font-size:0.9rem;}
-th,td{padding:10px;border-bottom:1px solid #e5e7eb;}
-.empty-row{text-align:center;color:#aaa;}
-</style></head><body>${content}</body></html>`;
+  return `<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>${escapeHtml(title)}</title>
+  <style>
+    body {
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "SF Pro Text",
+        "Segoe UI", sans-serif;
+      background:#f3f4f6;
+      margin:0;
+    }
+    .container {
+      max-width: 720px;
+      margin: 40px auto;
+      padding: 24px;
+      background: #ffffff;
+      border-radius: 16px;
+      box-shadow: 0 18px 45px rgba(15,23,42,0.12);
+    }
+    h1 { margin: 0 0 12px; font-size: 1.6rem; }
+    h2 { margin-top: 24px; margin-bottom: 8px; font-size: 1.1rem; }
+
+    .summary-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+      gap: 12px;
+      margin-bottom: 24px;
+    }
+    .summary-card {
+      padding: 14px;
+      border-radius: 12px;
+      border: 1px solid #e5e7eb;
+      background: #fff;
+    }
+    .summary-card.highlight {
+      border-color:#4f46e5;
+      background: radial-gradient(circle at top left, #eef2ff, #f9fafb);
+    }
+    .label {
+      font-size: 0.75rem;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color:#6b7280;
+      margin-bottom: 4px;
+    }
+    .value {
+      font-size: 1.1rem;
+      font-weight: 600;
+      color:#111827;
+    }
+
+    .button-block { margin: 18px 0; }
+    .btn {
+      display:inline-block;
+      padding: 10px 18px;
+      border-radius: 999px;
+      text-decoration:none;
+      font-weight:600;
+      font-size:0.95rem;
+      border:none;
+      cursor:pointer;
+    }
+    .btn-blue { background:#3b82f6; color:white; }
+    .btn-green { background:#10b981; color:white; }
+    .btn-purple { background:#4f46e5; color:white; }
+    .btn-dark { background:#111827; color:white; }
+
+    .fee-breakdown {
+      margin-top: 6px;
+      font-size: 0.85rem;
+      color:#4b5563;
+      line-height:1.4;
+    }
+    .fee-breakdown.small { font-size:0.8rem; }
+
+    .section { margin-top: 24px; }
+
+    .table-wrapper {
+      margin-top: 10px;
+      border-radius: 12px;
+      border: 1px solid #e5e7eb;
+      overflow: hidden;
+      background:#fff;
+    }
+    table { width:100%; border-collapse: collapse; font-size:0.9rem; }
+    th, td {
+      padding: 10px 12px;
+      border-bottom:1px solid #e5e7eb;
+      text-align:left;
+    }
+    th {
+      background:#f9fafb;
+      font-size:0.8rem;
+      text-transform:uppercase;
+      letter-spacing:0.06em;
+      color:#4b5563;
+    }
+    .empty-row { text-align:center; color:#9ca3af; font-style:italic; }
+
+    .program-grid {
+      display:grid;
+      grid-template-columns:1fr;
+      gap:12px;
+    }
+    .program-card {
+      display:block;
+      padding:14px 16px;
+      border-radius:12px;
+      border:1px solid #e5e7eb;
+      background:#fff;
+      text-decoration:none;
+      color:inherit;
+      transition: box-shadow 0.15s ease, transform 0.15s ease, border-color 0.15s ease;
+    }
+    .program-card:hover {
+      transform: translateY(-1px);
+      border-color:#4f46e5;
+      box-shadow:0 12px 24px rgba(15,23,42,0.12);
+    }
+
+    label {
+      display:block;
+      font-size:0.9rem;
+      margin-bottom:4px;
+      color:#374151;
+    }
+    input[type="number"] {
+      width:100%;
+      padding:8px 10px;
+      border-radius:8px;
+      border:1px solid #d1d5db;
+      font-size:0.95rem;
+      box-sizing:border-box;
+      margin-bottom:8px;
+    }
+    input[type="number"]:focus {
+      outline:none;
+      border-color:#4f46e5;
+      box-shadow:0 0 0 1px #4f46e5;
+    }
+    .error-message {
+      color:#b91c1c;
+      font-size:0.8rem;
+      margin-top:4px;
+    }
+    .paid-message {
+      font-size:0.95rem;
+      color:#16a34a;
+      font-weight:500;
+    }
+
+    @media (max-width: 640px) {
+      .container {
+        margin:16px;
+        padding:18px;
+      }
+    }
+  </style>
+</head>
+<body>
+${content}
+</body>
+</html>`;
 }
 
 function safeNumber(val) {
+  if (val === null || val === undefined || val === "") return NaN;
   const num = Number(val);
   return isNaN(num) ? NaN : num;
 }
 
 function formatCurrency(num) {
   if (isNaN(num)) return "—";
-  return `$${num.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+  return `$${num.toLocaleString("en-US", {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  })}`;
 }
 
 function escapeHtml(s) {
-  return String(s)
+  return String(s || "")
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")
@@ -458,9 +794,24 @@ function escapeHtml(s) {
 }
 
 function textResponse(code, text) {
-  return { statusCode: code, headers: { "Content-Type": "text/plain" }, body: text };
+  return {
+    statusCode: code,
+    headers: { "Content-Type": "text/plain; charset=utf-8" },
+    body: text,
+  };
 }
 
 function htmlResponse(code, html) {
-  return { statusCode: code, headers: { "Content-Type": "text/html" }, body: html };
+  return {
+    statusCode: code,
+    headers: { "Content-Type": "text/html; charset=utf-8" },
+    body: html,
+  };
+}
+
+function basicPage(title, contentHtml) {
+  return stripeStylePage(
+    title,
+    `<div class="container"><h1>${escapeHtml(title)}</h1>${contentHtml}</div>`
+  );
 }
