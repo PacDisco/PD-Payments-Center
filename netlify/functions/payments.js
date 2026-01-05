@@ -411,7 +411,9 @@ function renderDealPortal(deal) {
           .join("")
       : `<tr><td colspan="3" class="empty-row">No payments yet.</td></tr>`;
 
-  // Main page HTML
+  const encodedDealId = encodeURIComponent(deal.id);
+  const encodedEmail = encodeURIComponent(p.email || "");
+
   const content = `
     <div class="container">
       <h1>${escapeHtml(programName)}</h1>
@@ -435,9 +437,7 @@ function renderDealPortal(deal) {
         shouldShowAppFeeBtn
           ? `
       <div class="button-block">
-        <a href="?checkout=1&type=appfee&dealId=${encodeURIComponent(
-          deal.id
-        )}&email=${encodeURIComponent(p.email || "")}"
+        <a href="?checkout=1&type=appfee&dealId=${encodedDealId}&email=${encodedEmail}"
            class="btn btn-blue">
           Pay Application Fee
         </a>
@@ -450,9 +450,7 @@ function renderDealPortal(deal) {
         shouldShowDepositBtn && hasRemaining
           ? `
       <div class="button-block">
-        <a href="?checkout=1&type=deposit&dealId=${encodeURIComponent(
-          deal.id
-        )}&email=${encodeURIComponent(p.email || "")}"
+        <a href="?checkout=1&type=deposit&dealId=${encodedDealId}&email=${encodedEmail}"
            class="btn btn-green">
           Pay Deposit (${formatCurrency(depositRemaining)})
         </a>
@@ -465,9 +463,7 @@ function renderDealPortal(deal) {
         hasRemaining
           ? `
       <div class="button-block">
-        <a href="?checkout=1&type=remaining&dealId=${encodeURIComponent(
-          deal.id
-        )}&email=${encodeURIComponent(p.email || "")}"
+        <a href="?checkout=1&type=remaining&dealId=${encodedDealId}&email=${encodedEmail}"
            class="btn btn-purple">
           Pay Remaining Balance
         </a>
@@ -484,28 +480,37 @@ function renderDealPortal(deal) {
       ${
         hasRemaining
           ? `
-      <div class="section" id="custom-payment-section"
-           data-remaining="${remaining.toFixed(2)}">
-        <h2>Make a Payment</h2>
-        <p>You can choose an amount to pay toward your remaining balance (minimum $250, up to your remaining balance).</p>
-        <form id="custom-payment-form">
-          <label for="custom-amount">Amount in USD</label>
-          <input 
-            id="custom-amount" 
-            name="amount" 
-            type="number" 
-            step="0.01" 
-            min="250"
-            max="${remaining.toFixed(2)}"
-            placeholder="250.00" 
-            required
-          />
-          <button type="submit" class="btn btn-dark">
-            Make a Payment
-          </button>
-        </form>
-        <div id="custom-fee-summary" class="fee-breakdown small"></div>
-        <div id="custom-error" class="error-message"></div>
+      <div class="custom-payment-wrapper">
+        <div class="custom-payment-card" id="custom-payment-section"
+             data-remaining="${remaining.toFixed(2)}">
+
+          <h3 class="custom-title">Make a Payment</h3>
+          <p class="custom-description">
+            Choose an amount to pay toward your remaining balance.<br>
+            Minimum $250, up to your remaining balance.
+          </p>
+
+          <form id="custom-payment-form">
+            <label for="custom-amount">Amount in USD</label>
+            <input 
+              id="custom-amount" 
+              name="amount" 
+              type="number" 
+              step="0.01" 
+              min="250"
+              max="${remaining.toFixed(2)}"
+              placeholder="250.00" 
+              required
+            />
+            <button type="submit" class="btn btn-dark small-btn">
+              Make a Payment
+            </button>
+          </form>
+
+          <div id="custom-fee-summary" class="fee-breakdown small"></div>
+          <div id="custom-error" class="error-message"></div>
+
+        </div>
       </div>
       `
           : ""
@@ -672,6 +677,7 @@ function stripeStylePage(title, content) {
     .btn-green { background:#10b981; color:white; }
     .btn-purple { background:#4f46e5; color:white; }
     .btn-dark { background:#111827; color:white; }
+    .small-btn { padding: 8px 12px; border-radius: 8px; font-size: 0.85rem; }
 
     .fee-breakdown {
       margin-top: 6px;
@@ -757,10 +763,47 @@ function stripeStylePage(title, content) {
       font-weight:500;
     }
 
-    @media (max-width: 640px) {
+    /* Right-side custom payment block */
+    .custom-payment-wrapper {
+      display: flex;
+      justify-content: flex-end;
+      margin-top: 30px;
+    }
+
+    .custom-payment-card {
+      width: 280px;
+      padding: 18px;
+      border-radius: 14px;
+      border: 1px solid #e5e7eb;
+      background: #fafafa;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.05);
+    }
+
+    .custom-title {
+      margin: 0 0 8px 0;
+      font-size: 1.05rem;
+      font-weight: 600;
+    }
+
+    .custom-description {
+      margin: 0 0 14px 0;
+      font-size: 0.85rem;
+      color: #4b5563;
+    }
+
+    /* Responsive: full-width on mobile */
+    @media (max-width: 768px) {
       .container {
         margin:16px;
         padding:18px;
+      }
+
+      .custom-payment-wrapper {
+        justify-content: center;
+      }
+
+      .custom-payment-card {
+        width: 100%;
       }
     }
   </style>
