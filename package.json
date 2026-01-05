@@ -1,0 +1,24 @@
+{
+  "name": "pd-payments-center",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/PacDisco/PD-Payments-Center.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/PacDisco/PD-Payments-Center/issues"
+  },
+  "homepage": "https://github.com/PacDisco/PD-Payments-Center#readme",
+  "dependencies": {
+    "stripe": "^20.1.0"
+  }
+}
