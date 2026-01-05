@@ -1,6 +1,7 @@
 // netlify/functions/payments.js
 
 const HUBSPOT_BASE = "https://api.hubapi.com";
+const stripe = require("stripe")(process.env.STRIPE_SECRET_KEY);
 
 const PAYMENT_FIELDS = [
   "payment_1",
@@ -17,6 +18,7 @@ exports.handler = async (event) => {
     const url = new URL(event.rawUrl);
     const email = url.searchParams.get("email");
     const dealId = url.searchParams.get("dealId");
+    const checkout = url.searchParams.get("checkout");
 
     contactEmailGlobal = email;
 
@@ -26,6 +28,103 @@ exports.handler = async (event) => {
         "HubSpot token not configured. Please set HUBSPOT_PRIVATE_APP_TOKEN in Netlify."
       );
     }
+
+    // ---------- STRIPE CHECKOUT BRANCH ----------
+    // When ?checkout=1 is present, create a Stripe Checkout Session
+    if (checkout === "1") {
+      if (!process.env.STRIPE_SECRET_KEY) {
+        return textResponse(
+          500,
+          "Stripe is not configured. Please set STRIPE_SECRET_KEY in Netlify."
+        );
+      }
+
+      if (!dealId) {
+        return textResponse(400, "Missing dealId for checkout.");
+      }
+
+      // Get the deal so we can re-calculate the remaining balance securely
+      const deal = await getDealById(dealId);
+      if (!deal) {
+        return textResponse(404, "Could not find that program / deal for checkout.");
+      }
+
+      const p = deal.properties || {};
+      const programName = p.dealname || "Program payment";
+
+      const programFee = safeNumber(p.amount);
+      const totalPaidFromField = safeNumber(p.total_amount_paid);
+
+      // Parse individual payment fields as fallback for total paid
+      const payments = [];
+      PAYMENT_FIELDS.forEach((key) => {
+        const raw = p[key];
+        if (!raw) return;
+        const parts = raw.split(",").map((s) => s.trim());
+        if (!parts[0]) return;
+        const amt = safeNumber(parts[0]);
+        if (!isNaN(amt)) {
+          payments.push({ amount: amt });
+        }
+      });
+
+      const totalPaid = !isNaN(totalPaidFromField)
+        ? totalPaidFromField
+        : payments.reduce((sum, pay) => sum + pay.amount, 0);
+
+      const remaining =
+        !isNaN(programFee) && !isNaN(totalPaid) ? programFee - totalPaid : NaN;
+
+      if (isNaN(remaining) || remaining <= 0) {
+        return textResponse(
+          400,
+          "There is no outstanding balance to pay for this program."
+        );
+      }
+
+      // 3.5% card transaction fee
+      const fee = remaining * 0.035;
+      const totalWithFee = remaining + fee;
+
+      // Build cancel URL that returns user to the same program payment page
+      const baseUrl = new URL(event.rawUrl);
+      baseUrl.search = ""; // clear existing query
+      const cancelUrl = new URL(baseUrl.toString());
+      cancelUrl.searchParams.set("dealId", dealId);
+      if (email) cancelUrl.searchParams.set("email", email);
+
+      // Create Stripe Checkout Session (USD, live key from STRIPE_SECRET_KEY)
+      const session = await stripe.checkout.sessions.create({
+        mode: "payment",
+        payment_method_types: ["card"],
+        customer_email: email || undefined,
+        line_items: [
+          {
+            price_data: {
+              currency: "usd",
+              product_data: {
+                name: programName,
+                description: "Program payment including card transaction fee (3.5%)",
+              },
+              unit_amount: Math.round(totalWithFee * 100), // cents
+            },
+            quantity: 1,
+          },
+        ],
+        success_url:
+          "https://pacificdiscovery.org/success?session_id={CHECKOUT_SESSION_ID}",
+        cancel_url: cancelUrl.toString(),
+      });
+
+      return {
+        statusCode: 302,
+        headers: {
+          Location: session.url,
+        },
+        body: "",
+      };
+    }
+    // ---------- END STRIPE CHECKOUT BRANCH ----------
 
     // If dealId is present → render the payment portal for that deal
     if (dealId) {
@@ -284,6 +383,11 @@ function renderDealPortal(deal) {
   const remaining =
     !isNaN(programFee) && !isNaN(totalPaid) ? programFee - totalPaid : NaN;
 
+  const fee =
+    !isNaN(remaining) && remaining > 0 ? remaining * 0.035 : NaN;
+  const totalWithFee =
+    !isNaN(remaining) && !isNaN(fee) ? remaining + fee : NaN;
+
   const paymentRows =
     payments.length > 0
       ? payments
@@ -297,6 +401,9 @@ function renderDealPortal(deal) {
           )
           .join("")
       : `<tr><td colspan="3" class="empty-row">No payments have been recorded yet.</td></tr>`;
+
+  const shouldShowPayButton =
+    !isNaN(remaining) && remaining > 0.01 && !isNaN(totalWithFee);
 
   const body = `
     <div class="container">
@@ -315,17 +422,28 @@ function renderDealPortal(deal) {
           <div class="label">Paid so far</div>
           <div class="value">${formatCurrency(totalPaid)}</div>
         </div>
-        <div class="summary-card highlight">
+        <div class="summary-card">
           <div class="label">Remaining balance</div>
           <div class="value">${formatCurrency(remaining)}</div>
         </div>
+        <div class="summary-card">
+          <div class="label">Card transaction fee (3.5%)</div>
+          <div class="value">${formatCurrency(fee)}</div>
+        </div>
+        <div class="summary-card highlight">
+          <div class="label">Total to pay by card</div>
+          <div class="value">${formatCurrency(totalWithFee)}</div>
+        </div>
       </div>
 
-      <!-- PAY BALANCE BUTTON -->
+      ${
+        shouldShowPayButton
+          ? `
+      <!-- PAY BALANCE BUTTON VIA STRIPE -->
       <div style="margin: 20px 0 28px;">
         <a 
-          href="https://unearthededucation.org/pages/payments?amount=${encodeURIComponent(
-            remaining
+          href="?checkout=1&dealId=${encodeURIComponent(
+            deal.id
           )}&email=${encodeURIComponent(p.email || "")}"
           style="
             display:inline-block;
@@ -338,9 +456,14 @@ function renderDealPortal(deal) {
             font-size:0.95rem;
           "
         >
-          Pay Remaining Balance
+          Pay Remaining Balance (with 3.5% card fee)
         </a>
-      </div>
+      </div>`
+          : `
+      <div style="margin: 20px 0 28px; color:#16a34a; font-weight:500;">
+        Your balance is fully paid. No further payment is due.
+      </div>`
+      }
 
       <div class="section">
         <h2>Payment history</h2>
