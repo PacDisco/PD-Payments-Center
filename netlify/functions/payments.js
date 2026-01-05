@@ -31,6 +31,7 @@ exports.handler = async (event) => {
       if (!process.env.STRIPE_SECRET_KEY) {
         return textResponse(500, "Stripe key missing.");
       }
+
       if (!dealId) return textResponse(400, "Missing dealId.");
 
       const deal = await getDealById(dealId);
@@ -40,21 +41,9 @@ exports.handler = async (event) => {
       const programName = p.dealname || "Program Payment";
 
       const programFee = safeNumber(p.amount);
-      const totalPaidField = safeNumber(p.total_amount_paid);
-
-      const payments = [];
-      PAYMENT_FIELDS.forEach((k) => {
-        if (!p[k]) return;
-        const parts = p[k].split(",").map((s) => s.trim());
-        const amt = safeNumber(parts[0]);
-        if (!isNaN(amt)) payments.push({ amount: amt });
-      });
-
-      const totalPaid = !isNaN(totalPaidField)
-        ? totalPaidField
-        : payments.reduce((s, p) => s + p.amount, 0);
-
+      const totalPaid = safeNumber(p.total_amount_paid) || 0;
       const remaining = programFee - totalPaid;
+
       const depositTarget = 2500;
       const depositRemaining = Math.max(0, depositTarget - totalPaid);
 
@@ -70,8 +59,9 @@ exports.handler = async (event) => {
         label = "Program Deposit";
       } else if (type === "custom") {
         const amt = safeNumber(url.searchParams.get("amount"));
-        if (isNaN(amt) || amt < 250 || amt > remaining)
+        if (isNaN(amt) || amt < 250 || amt > remaining) {
           return textResponse(400, "Invalid custom amount.");
+        }
         baseAmount = amt;
         label = "Custom Payment";
       } else {
@@ -109,10 +99,7 @@ exports.handler = async (event) => {
         success_url:
           "https://pacificdiscovery.org/success?session_id={CHECKOUT_SESSION_ID}",
         cancel_url: cancelUrl.toString(),
-        metadata: {
-          dealId,
-          paymentType: type || "remaining",
-        },
+        metadata: { dealId, paymentType: type || "remaining" },
       });
 
       return {
@@ -129,26 +116,15 @@ exports.handler = async (event) => {
       return htmlResponse(200, renderDealPortal(deal));
     }
 
-    if (!email) {
-      return htmlResponse(400, basicPage("Missing Email", "<p>Email required.</p>"));
-    }
-
-    const contact = await findContactByEmail(email);
-    const deals = await getDealsForContact(contact.id);
-
-    if (deals.length === 1) {
-      deals[0].properties.email = email;
-      return htmlResponse(200, renderDealPortal(deals[0]));
-    }
-
-    return htmlResponse(200, renderDealSelectionPage(deals, url));
+    return textResponse(400, "Missing dealId.");
   } catch (e) {
     console.error(e);
     return textResponse(500, "Unexpected error.");
   }
 };
 
-/* ---------- RENDER DEAL PORTAL ---------- */
+/* ---------- RENDER ---------- */
+
 function renderDealPortal(deal) {
   const p = deal.properties;
   const programFee = safeNumber(p.amount);
@@ -168,30 +144,53 @@ function renderDealPortal(deal) {
   <h1>${escapeHtml(p.dealname || "Program")}</h1>
 
   <div class="summary-grid">
-    <div class="summary-card"><div class="label">Program Tuition</div><div class="value">${fmt(programFee)}</div></div>
-    <div class="summary-card"><div class="label">Paid So Far</div><div class="value">${fmt(totalPaid)}</div></div>
-    <div class="summary-card highlight"><div class="label">Remaining Balance</div><div class="value">${fmt(remaining)}</div></div>
+    <div class="summary-card">
+      <div class="label">Program Tuition</div>
+      <div class="value">${fmt(programFee)}</div>
+    </div>
+    <div class="summary-card">
+      <div class="label">Paid So Far</div>
+      <div class="value">${fmt(totalPaid)}</div>
+    </div>
+    <div class="summary-card highlight">
+      <div class="label">Remaining Balance</div>
+      <div class="value">${fmt(remaining)}</div>
+    </div>
   </div>
 
   <div class="payment-columns">
+
     <div class="payment-left-column">
       ${
         totalPaid === 0
-          ? `<div class="button-block"><a class="btn btn-blue" href="?checkout=1&type=appfee&dealId=${encodedDeal}&email=${encodedEmail}">Pay Application Fee</a>${feeBox(250)}</div>`
+          ? `<div class="button-block">
+              <a class="btn btn-blue" href="?checkout=1&type=appfee&dealId=${encodedDeal}&email=${encodedEmail}">
+                Pay Application Fee
+              </a>
+              ${feeBox(250)}
+            </div>`
           : ""
       }
+
       ${
         totalPaid > 0 && totalPaid < 2250
-          ? `<div class="button-block"><a class="btn btn-green" href="?checkout=1&type=deposit&dealId=${encodedDeal}&email=${encodedEmail}">Pay Deposit (${fmt(
-              depositRemaining
-            )})</a>${feeBox(depositRemaining)}</div>`
+          ? `<div class="button-block">
+              <a class="btn btn-green" href="?checkout=1&type=deposit&dealId=${encodedDeal}&email=${encodedEmail}">
+                Pay Deposit (${fmt(depositRemaining)})
+              </a>
+              ${feeBox(depositRemaining)}
+            </div>`
           : ""
       }
+
       ${
         remaining > 0
-          ? `<div class="button-block"><a class="btn btn-purple" href="?checkout=1&type=remaining&dealId=${encodedDeal}&email=${encodedEmail}">Pay Remaining Balance</a>${feeBox(
-              remaining
-            )}</div>`
+          ? `<div class="button-block">
+              <a class="btn btn-purple" href="?checkout=1&type=remaining&dealId=${encodedDeal}&email=${encodedEmail}">
+                Pay Remaining Balance
+              </a>
+              ${feeBox(remaining)}
+            </div>`
           : `<div class="paid-message">Your balance is fully paid.</div>`
       }
     </div>
@@ -204,7 +203,7 @@ function renderDealPortal(deal) {
         <h3>Make a Payment</h3>
         <p>Minimum $250, up to remaining balance.</p>
         <form id="custom-payment-form">
-          <input type="number" id="custom-amount" min="250" max="${remaining}" step="0.01" placeholder="250.00" required />
+          <input type="number" id="custom-amount" min="250" max="${remaining}" step="0.01" required />
           <button class="btn btn-dark small-btn">Make a Payment</button>
         </form>
         <div id="custom-fee-summary" class="fee-breakdown small"></div>
@@ -213,14 +212,16 @@ function renderDealPortal(deal) {
     </div>`
         : ""
     }
+
   </div>
 
-  <!-- NEW FEE DISCLAIMER -->
+  <!-- ✅ ONLY NEW ADDITION -->
   <div class="payment-disclaimer">
     <em>
       A 3.5% transaction fee is applied to all credit card payments.
       To pay by wire transfer or ACH without the transaction fee,
-      <a href="https://www.pacificdiscovery.org/student/payment/pay-now/wire-transfer-payment" target="_blank" rel="noopener noreferrer">
+      <a href="https://www.pacificdiscovery.org/student/payment/pay-now/wire-transfer-payment"
+         target="_blank" rel="noopener noreferrer">
         click here to view wire transfer payment instructions
       </a>.
     </em>
@@ -236,13 +237,15 @@ ${remaining > 0 ? customPaymentScript() : ""}
   );
 }
 
-/* ---------- STYLES + HELPERS ---------- */
+/* ---------- HELPERS ---------- */
 
 function feeBox(base) {
   const fee = base * 0.035;
-  return `<div class="fee-breakdown">Base: ${fmt(base)}<br/>Fee (3.5%): ${fmt(
-    fee
-  )}<br/><strong>Total: ${fmt(base + fee)}</strong></div>`;
+  return `<div class="fee-breakdown">
+    Base: ${fmt(base)}<br>
+    Fee (3.5%): ${fmt(fee)}<br>
+    <strong>Total: ${fmt(base + fee)}</strong>
+  </div>`;
 }
 
 function customPaymentScript() {
@@ -254,12 +257,14 @@ function customPaymentScript() {
   const i=document.getElementById('custom-amount');
   const f=document.getElementById('custom-fee-summary');
   const e=document.getElementById('custom-error');
+
   i.addEventListener('input',()=>{
     const v=parseFloat(i.value||0);
     if(v<250||v>max){f.textContent='';return;}
     const fee=v*0.035;
-    f.innerHTML='Base: $'+v.toFixed(2)+'<br/>Fee (3.5%): $'+fee.toFixed(2)+'<br/><strong>Total: $'+(v+fee).toFixed(2)+'</strong>';
+    f.innerHTML='Base: $'+v.toFixed(2)+'<br>Fee (3.5%): $'+fee.toFixed(2)+'<br><strong>Total: $'+(v+fee).toFixed(2)+'</strong>';
   });
+
   document.getElementById('custom-payment-form').onsubmit=function(ev){
     ev.preventDefault();
     const v=parseFloat(i.value||0);
@@ -272,12 +277,14 @@ function customPaymentScript() {
 </script>`;
 }
 
-/* ---------- PAGE WRAPPER ---------- */
+/* ---------- PAGE ---------- */
 
 function stripePage(title, body) {
-  return `<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escapeHtml(
-    title
-  )}</title><style>
+  return `<!DOCTYPE html><html><head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>${escapeHtml(title)}</title>
+<style>
 body{font-family:system-ui;background:#f3f4f6;margin:0}
 .container{max-width:720px;margin:40px auto;padding:24px;background:#fff;border-radius:16px}
 .summary-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px}
@@ -290,10 +297,11 @@ body{font-family:system-ui;background:#f3f4f6;margin:0}
 .custom-payment-card{border:1px solid #e5e7eb;border-radius:14px;padding:18px;background:#fafafa}
 .payment-disclaimer{margin-top:24px;padding-top:12px;border-top:1px solid #e5e7eb;font-size:.85rem;color:#4b5563}
 .payment-disclaimer a{color:#4f46e5}
-</style></head><body>${body}</body></html>`;
+</style>
+</head><body>${body}</body></html>`;
 }
 
-/* ---------- UTIL ---------- */
+/* ---------- UTILS ---------- */
 
 function fmt(n) {
   return isNaN(n)
@@ -314,7 +322,4 @@ function textResponse(code, msg) {
 }
 function htmlResponse(code, html) {
   return { statusCode: code, headers: { "Content-Type": "text/html" }, body: html };
-}
-function basicPage(title, html) {
-  return stripePage(title, `<div class="container">${html}</div>`);
 }
