@@ -175,9 +175,18 @@ function renderDealPortal(deal) {
 <h1>${escape(p.dealname || "Program")}</h1>
 
 <div class="summary-grid">
-  <div class="summary-card"><div class="label">Program Tuition</div><div class="value">${money(tuition)}</div></div>
-  <div class="summary-card"><div class="label">Paid So Far</div><div class="value">${money(totalPaid)}</div></div>
-  <div class="summary-card highlight"><div class="label">Remaining Balance</div><div class="value">${money(remaining)}</div></div>
+  <div class="summary-card">
+    <div class="label">Program Tuition</div>
+    <div class="value">${money(tuition)}</div>
+  </div>
+  <div class="summary-card">
+    <div class="label">Paid So Far</div>
+    <div class="value">${money(totalPaid)}</div>
+  </div>
+  <div class="summary-card highlight">
+    <div class="label">Remaining Balance</div>
+    <div class="value">${money(remaining)}</div>
+  </div>
 </div>
 
 <div class="payment-layout">
@@ -204,19 +213,25 @@ function renderDealPortal(deal) {
   }
 </div>
 
-<div class="payment-disclaimer">
-  <em>
-    A 3.5% transaction fee is applied to all credit card payments.
-    To pay by wire transfer or ACH without the transaction fee,
-    <a href="https://www.pacificdiscovery.org/student/payment/pay-now/wire-transfer-payment" target="_blank">
-      click here to view wire transfer payment instructions
-    </a>.
-  </em>
+<!-- INFO CALLOUT -->
+<div class="payment-disclaimer info">
+  <strong>Payment note:</strong>
+  A 3.5% transaction fee is applied to all credit card payments.
+  To pay by wire transfer or ACH without the transaction fee,
+  <a href="https://www.pacificdiscovery.org/student/payment/pay-now/wire-transfer-payment" target="_blank">
+    click here to view wire transfer payment instructions
+  </a>.
 </div>
 
 <h2>Payment History</h2>
 <table>
-<thead><tr><th>Amount</th><th>Date</th><th>Transaction ID</th></tr></thead>
+<thead>
+<tr>
+  <th>Amount</th>
+  <th>Date</th>
+  <th>Transaction ID</th>
+</tr>
+</thead>
 <tbody>${rows}</tbody>
 </table>
 
@@ -281,7 +296,9 @@ function presetButton(dealId, label, type, amt) {
   <a class="btn" href="?checkout=1&type=${type}&dealId=${dealId}">
     ${label} (${money(amt)})
   </a>
-  <div class="fee">Base ${money(amt)} | Fee ${money(fee)} | <strong>Total ${money(amt + fee)}</strong></div>
+  <div class="fee">
+    Base ${money(amt)} | Fee ${money(fee)} | <strong>Total ${money(amt + fee)}</strong>
+  </div>
 </div>`;
 }
 
@@ -334,7 +351,21 @@ body{font-family:system-ui;background:#f3f4f6;margin:0}
 .btn{display:inline-block;padding:10px 18px;border-radius:999px;background:#4f46e5;color:#fff;text-decoration:none;font-weight:600}
 button{padding:10px 14px;border-radius:10px;border:none;background:#111827;color:#fff;font-weight:600;cursor:pointer}
 button:disabled{opacity:.5;cursor:not-allowed}
-.payment-disclaimer{margin:28px 0 16px;padding-top:14px;border-top:1px solid #e5e7eb;font-size:.85rem;color:#4b5563}
+.payment-disclaimer.info{
+  margin:28px 0 20px;
+  padding:14px 16px;
+  border-radius:12px;
+  background:#eff6ff;
+  border:1px solid #bfdbfe;
+  color:#1e3a8a;
+  font-size:.9rem;
+  line-height:1.45
+}
+.payment-disclaimer.info a{
+  color:#1d4ed8;
+  font-weight:600;
+  text-decoration:underline
+}
 table{width:100%;border-collapse:collapse}
 th,td{padding:12px;border-bottom:1px solid #e5e7eb}
 th{background:#f9fafb;font-size:.8rem}
@@ -351,5 +382,9 @@ function textResponse(code, msg) {
   return { statusCode: code, body: msg };
 }
 function htmlResponse(code, html) {
-  return { statusCode: code, headers: { "Content-Type": "text/html" }, body: html };
+  return {
+    statusCode: code,
+    headers: { "Content-Type": "text/html" },
+    body: html,
+  };
 }
