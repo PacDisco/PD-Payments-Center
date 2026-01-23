@@ -184,7 +184,7 @@ async function handleStripeCheckout(event, url) {
       },
     ],
     success_url:
-      "https://pacificdiscovery.org/success?session_id={CHECKOUT_SESSION_ID}",
+      "https://www.pacificdiscovery.org/student/payment/pay-now/payment-success?session_id={CHECKOUT_SESSION_ID}",
     cancel_url: cancelUrl.toString(),
     metadata: { dealId, paymentType: type || "remaining" },
   });
