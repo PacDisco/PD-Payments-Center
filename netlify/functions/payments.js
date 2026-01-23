@@ -1,5 +1,3 @@
-// netlify/functions/payments.js
-
 const HUBSPOT_BASE = "https://api.hubapi.com";
 const stripe = require("stripe")(process.env.STRIPE_SECRET_KEY);
 
@@ -16,6 +14,17 @@ const APP_FEE = 250; // USD
 const DEPOSIT_TARGET = 2500; // USD
 const DEPOSIT_BUTTON_HIDE_AT_PAID = 2250; // Show deposit button if paid < 2250 (your rule)
 const CARD_FEE_RATE = 0.035; // 3.5%
+
+// ✅ NEW: First-payment success URL (Link A) + Pay Later URL
+const SUCCESS_URL_FIRST_PAYMENT =
+  "https://www.pacificdiscovery.org/student/payment/pay-now/payment-success";
+
+// Keep your existing success link for every other time
+const SUCCESS_URL_REPEAT_PAYMENT = "https://pacificdiscovery.org/success";
+
+// Pay later URL (same as Link A per your request)
+const PAY_LATER_URL =
+  "https://www.pacificdiscovery.org/student/payment/pay-now/payment-success";
 
 exports.handler = async (event) => {
   try {
@@ -167,6 +176,13 @@ async function handleStripeCheckout(event, url) {
   cancelUrl.searchParams.set("dealId", dealId);
   if (email) cancelUrl.searchParams.set("email", email);
 
+  // ✅ NEW: First payment vs repeat payment success URL
+  const isFirstPayment = totalPaid === 0;
+
+  const successUrl = isFirstPayment
+    ? `${SUCCESS_URL_FIRST_PAYMENT}?session_id={CHECKOUT_SESSION_ID}`
+    : `${SUCCESS_URL_REPEAT_PAYMENT}?session_id={CHECKOUT_SESSION_ID}`;
+
   const session = await stripe.checkout.sessions.create({
     mode: "payment",
     customer_email: email || undefined,
@@ -183,8 +199,7 @@ async function handleStripeCheckout(event, url) {
         quantity: 1,
       },
     ],
-    success_url:
-      "https://www.pacificdiscovery.org/student/payment/pay-now/payment-success?session_id={CHECKOUT_SESSION_ID}",
+    success_url: successUrl,
     cancel_url: cancelUrl.toString(),
     metadata: { dealId, paymentType: type || "remaining" },
   });
@@ -305,7 +320,11 @@ function renderDealSelectionPage(deals, currentUrl, email) {
       return `
         <a href="${link.toString()}" class="program-card">
           <div class="program-name">${escapeHtml(name)}</div>
-          ${amountStr ? `<div class="program-amount">Program tuition: ${amountStr}</div>` : ""}
+          ${
+            amountStr
+              ? `<div class="program-amount">Program tuition: ${amountStr}</div>`
+              : ""
+          }
           <div class="program-view">View payments →</div>
         </a>
       `;
@@ -363,6 +382,9 @@ function renderDealPortal(deal) {
   const showDeposit = totalPaid > 0 && totalPaid < DEPOSIT_BUTTON_HIDE_AT_PAID;
   const showRemaining = !isNaN(remaining) && remaining > 0;
 
+  // ✅ NEW: show Pay Later only for first payment (same condition as Link A)
+  const showPayLater = totalPaid === 0;
+
   const email = p.email || "";
 
   const body = `
@@ -391,9 +413,53 @@ function renderDealPortal(deal) {
 
       <div class="payment-layout">
         <div class="actions">
-          ${showAppFee ? renderPayBlock("Pay Application Fee", "appfee", APP_FEE, deal.id, email) : ""}
-          ${showDeposit ? renderPayBlock("Pay Deposit", "deposit", depositRemaining, deal.id, email) : ""}
-          ${showRemaining ? renderPayBlock("Pay Remaining Balance", "remaining", remaining, deal.id, email) : `<div class="paid-in-full">Your balance is fully paid.</div>`}
+          ${
+            showAppFee
+              ? renderPayBlock(
+                  "Pay Application Fee",
+                  "appfee",
+                  APP_FEE,
+                  deal.id,
+                  email
+                )
+              : ""
+          }
+
+          ${
+            showPayLater
+              ? `
+            <div class="pay-block">
+              <a class="btn btn-secondary" href="${PAY_LATER_URL}">
+                Pay Later
+              </a>
+              <div class="fee">You can come back anytime to complete your payment.</div>
+            </div>
+          `
+              : ""
+          }
+
+          ${
+            showDeposit
+              ? renderPayBlock(
+                  "Pay Deposit",
+                  "deposit",
+                  depositRemaining,
+                  deal.id,
+                  email
+                )
+              : ""
+          }
+          ${
+            showRemaining
+              ? renderPayBlock(
+                  "Pay Remaining Balance",
+                  "remaining",
+                  remaining,
+                  deal.id,
+                  email
+                )
+              : `<div class="paid-in-full">Your balance is fully paid.</div>`
+          }
         </div>
 
         ${
@@ -650,6 +716,12 @@ function stripeStylePage(title, innerHtml) {
       font-weight: 650;
       font-size: 0.95rem;
     }
+
+    /* ✅ NEW: Secondary button style */
+    .btn.btn-secondary {
+      background: #64748b;
+    }
+
     .fee {
       margin-top: 6px;
       font-size: 0.86rem;
