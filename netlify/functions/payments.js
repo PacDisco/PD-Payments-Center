@@ -20,7 +20,7 @@ const SUCCESS_URL_FIRST_PAYMENT =
   "https://www.pacificdiscovery.org/student/payment/pay-now/payment-success";
 
 // Keep your existing success link for every other time
-const SUCCESS_URL_REPEAT_PAYMENT = "https://pacificdiscovery.org/success";
+const SUCCESS_URL_REPEAT_PAYMENT = "https://www.pacificdiscovery.org/student/payment/pay-now/payment-received";
 
 // Pay later URL (same as Link A per your request)
 const PAY_LATER_URL =
@@ -176,12 +176,12 @@ async function handleStripeCheckout(event, url) {
   cancelUrl.searchParams.set("dealId", dealId);
   if (email) cancelUrl.searchParams.set("email", email);
 
-  // ✅ NEW: First payment vs repeat payment success URL
+  // ✅ NEW: First payment vs repeat payment  URL
   const isFirstPayment = totalPaid === 0;
 
-  const successUrl = isFirstPayment
-    ? `${SUCCESS_URL_FIRST_PAYMENT}?session_id={CHECKOUT_SESSION_ID}`
-    : `${SUCCESS_URL_REPEAT_PAYMENT}?session_id={CHECKOUT_SESSION_ID}`;
+  const Url = isFirstPayment
+    ? `${_URL_FIRST_PAYMENT}?session_id={CHECKOUT_SESSION_ID}`
+    : `${_URL_REPEAT_PAYMENT}?session_id={CHECKOUT_SESSION_ID}`;
 
   const session = await stripe.checkout.sessions.create({
     mode: "payment",
@@ -199,7 +199,7 @@ async function handleStripeCheckout(event, url) {
         quantity: 1,
       },
     ],
-    success_url: successUrl,
+    _url: successUrl,
     cancel_url: cancelUrl.toString(),
     metadata: { dealId, paymentType: type || "remaining" },
   });
