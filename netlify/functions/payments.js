@@ -430,9 +430,9 @@ function renderDealPortal(deal) {
               ? `
             <div class="pay-block">
               <a class="btn btn-secondary" href="${PAY_LATER_URL}">
-                Pay Later
+                Pay During Interview
               </a>
-              <div class="fee">You can come back to complete your payment, but your space on will not be secured.</div>
+              <div class="fee">You can come back anytime to complete your payment, but your space on program will not be secured until payment is made.</div>
             </div>
           `
               : ""
