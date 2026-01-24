@@ -432,7 +432,7 @@ function renderDealPortal(deal) {
               <a class="btn btn-secondary" href="${PAY_LATER_URL}">
                 Pay Later
               </a>
-              <div class="fee">You can come back anytime to complete your payment.</div>
+              <div class="fee">You can come back to complete your payment, but your space on will not be secured.</div>
             </div>
           `
               : ""
