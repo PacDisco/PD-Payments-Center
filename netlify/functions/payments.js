@@ -179,30 +179,30 @@ async function handleStripeCheckout(event, url) {
   // ✅ NEW: First payment vs repeat payment  URL
   const isFirstPayment = totalPaid === 0;
 
-  const Url = isFirstPayment
-    ? `${_URL_FIRST_PAYMENT}?session_id={CHECKOUT_SESSION_ID}`
-    : `${_URL_REPEAT_PAYMENT}?session_id={CHECKOUT_SESSION_ID}`;
+  const successUrl = isFirstPayment
+  ? `${SUCCESS_URL_FIRST_PAYMENT}?session_id={CHECKOUT_SESSION_ID}`
+  : `${SUCCESS_URL_REPEAT_PAYMENT}?session_id={CHECKOUT_SESSION_ID}`;
 
-  const session = await stripe.checkout.sessions.create({
-    mode: "payment",
-    customer_email: email || undefined,
-    line_items: [
-      {
-        price_data: {
-          currency: "usd",
-          product_data: {
-            name: programName,
-            description: `${label} – Deal ID: ${dealId}`,
-          },
-          unit_amount: Math.round(total * 100),
+const session = await stripe.checkout.sessions.create({
+  mode: "payment",
+  customer_email: email || undefined,
+  line_items: [
+    {
+      price_data: {
+        currency: "usd",
+        product_data: {
+          name: programName,
+          description: `${label} – Deal ID: ${dealId}`,
         },
-        quantity: 1,
+        unit_amount: Math.round(total * 100),
       },
-    ],
-    _url: successUrl,
-    cancel_url: cancelUrl.toString(),
-    metadata: { dealId, paymentType: type || "remaining" },
-  });
+      quantity: 1,
+    },
+  ],
+  success_url: successUrl,
+  cancel_url: cancelUrl.toString(),
+  metadata: { dealId, paymentType: type || "remaining" },
+});
 
   return {
     statusCode: 302,
