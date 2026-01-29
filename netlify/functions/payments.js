@@ -10,22 +10,24 @@ const PAYMENT_FIELDS = [
 ];
 
 // Constants
-const APP_FEE = 250; // USD
-const DEPOSIT_TARGET = 2500; // USD
-const DEPOSIT_BUTTON_HIDE_AT_PAID = 2250; // Show deposit button if paid < 2250 (your rule)
-const CARD_FEE_RATE = 0.035; // 3.5%
+const APP_FEE = 250;
+const DEPOSIT_TARGET = 2500;
+const DEPOSIT_BUTTON_HIDE_AT_PAID = 2250;
+const CARD_FEE_RATE = 0.035;
 
-// First-payment success URL (Link A)
+// Success URLs
 const SUCCESS_URL_FIRST_PAYMENT =
   "https://www.pacificdiscovery.org/student/payment/pay-now/payment-success";
 
-// Repeat-payment success URL
 const SUCCESS_URL_REPEAT_PAYMENT =
   "https://www.pacificdiscovery.org/student/payment/pay-now/payment-received";
 
-// Pay later URL
 const PAY_LATER_URL =
   "https://www.pacificdiscovery.org/student/payment/pay-now/payment-success";
+
+/* =========================================================
+   HANDLER
+========================================================= */
 
 exports.handler = async (event) => {
   try {
@@ -35,10 +37,7 @@ exports.handler = async (event) => {
     const checkout = url.searchParams.get("checkout");
 
     if (!process.env.HUBSPOT_PRIVATE_APP_TOKEN) {
-      return textResponse(
-        500,
-        "HubSpot token not configured. Please set HUBSPOT_PRIVATE_APP_TOKEN."
-      );
+      return textResponse(500, "HubSpot token not configured.");
     }
 
     if (checkout === "1") {
@@ -50,20 +49,17 @@ exports.handler = async (event) => {
       if (!deal) {
         return htmlResponse(
           404,
-          basicPage("Could not find that program", `<p>Deal not found.</p>`)
+          basicPage("Deal not found", "<p>Program not found.</p>")
         );
       }
-      deal.properties.email = email || deal.properties.email || "";
+      deal.properties.email = email || "";
       return htmlResponse(200, renderDealPortal(deal));
     }
 
     if (!email) {
       return htmlResponse(
         400,
-        basicPage(
-          "Missing email",
-          `<p>Please access this page via the portal form so we know which account to look up.</p>`
-        )
+        basicPage("Missing email", "<p>Email is required.</p>")
       );
     }
 
@@ -71,26 +67,15 @@ exports.handler = async (event) => {
     if (!contact) {
       return htmlResponse(
         404,
-        basicPage(
-          "No account found",
-          `<p>We couldn't find any records for <strong>${escapeHtml(
-            email
-          )}</strong>.</p>`
-        )
+        basicPage("No account found", `<p>${escapeHtml(email)}</p>`)
       );
     }
 
     const deals = await getDealsForContact(contact.id, email);
-
-    if (!deals || deals.length === 0) {
+    if (!deals.length) {
       return htmlResponse(
         404,
-        basicPage(
-          "No programs found",
-          `<p>We found your contact (<strong>${escapeHtml(
-            email
-          )}</strong>) but no program payment records yet.</p>`
-        )
+        basicPage("No programs found", "<p>No programs yet.</p>")
       );
     }
 
@@ -100,7 +85,7 @@ exports.handler = async (event) => {
 
     return htmlResponse(200, renderDealSelectionPage(deals, url, email));
   } catch (err) {
-    console.error("Handler error:", err);
+    console.error(err);
     return textResponse(500, "Unexpected error");
   }
 };
@@ -110,10 +95,6 @@ exports.handler = async (event) => {
 ========================================================= */
 
 async function handleStripeCheckout(event, url) {
-  if (!process.env.STRIPE_SECRET_KEY) {
-    return textResponse(500, "Stripe key not configured. Set STRIPE_SECRET_KEY.");
-  }
-
   const dealId = url.searchParams.get("dealId");
   const type = url.searchParams.get("type");
   const email = url.searchParams.get("email") || "";
@@ -134,45 +115,18 @@ async function handleStripeCheckout(event, url) {
       ? safeNumber(p.total_amount_paid)
       : payments.reduce((s, pay) => s + pay.amount, 0);
 
-  const remaining = !isNaN(tuition) ? tuition - totalPaid : NaN;
-  const depositRemaining = Math.max(0, DEPOSIT_TARGET - totalPaid);
+  const remaining = tuition - totalPaid;
+  if (remaining <= 0) return textResponse(400, "No balance due.");
 
-  let base = 0;
-  let label = "";
-
-  if (type === "appfee") {
-    base = APP_FEE;
-    label = "Application Fee";
-  } else if (type === "deposit") {
-    base = depositRemaining;
-    label = "Program Deposit";
-  } else if (type === "custom") {
-    const amt = safeNumber(url.searchParams.get("amount"));
-    if (isNaN(amt)) return textResponse(400, "Invalid amount.");
-    if (amt < APP_FEE) return textResponse(400, "Minimum payment is $250.");
-    if (!isNaN(remaining) && amt > remaining)
-      return textResponse(400, "Amount cannot exceed remaining balance.");
-    base = amt;
-    label = "Custom Payment";
-  } else {
-    base = remaining;
-    label = "Remaining Program Balance";
-  }
-
-  if (!base || isNaN(base) || base <= 0) {
-    return textResponse(400, "No balance due.");
-  }
-
+  const base = remaining;
   const fee = base * CARD_FEE_RATE;
   const total = base + fee;
 
-  const baseUrl = new URL(event.rawUrl);
-  baseUrl.search = "";
-  const cancelUrl = new URL(baseUrl.toString());
+  const cancelUrl = new URL(event.rawUrl);
+  cancelUrl.search = "";
   cancelUrl.searchParams.set("dealId", dealId);
   if (email) cancelUrl.searchParams.set("email", email);
 
-  // ✅ FIXED SECTION (ONLY CHANGE)
   const isFirstPayment = totalPaid === 0;
 
   const successUrl = isFirstPayment
@@ -182,22 +136,18 @@ async function handleStripeCheckout(event, url) {
   const session = await stripe.checkout.sessions.create({
     mode: "payment",
     customer_email: email || undefined,
+    success_url: successUrl,
+    cancel_url: cancelUrl.toString(),
     line_items: [
       {
         price_data: {
           currency: "usd",
-          product_data: {
-            name: programName,
-            description: `${label} – Deal ID: ${dealId}`,
-          },
+          product_data: { name: programName },
           unit_amount: Math.round(total * 100),
         },
         quantity: 1,
       },
     ],
-    success_url: successUrl,
-    cancel_url: cancelUrl.toString(),
-    metadata: { dealId, paymentType: type || "remaining" },
   });
 
   return {
@@ -208,7 +158,93 @@ async function handleStripeCheckout(event, url) {
 }
 
 /* =========================================================
-   EVERYTHING BELOW IS UNCHANGED
+   HUBSPOT HELPERS
 ========================================================= */
 
-/* HubSpot helpers, UI rendering, styles, utils — unchanged from your file */
+async function hubSpotFetch(path, options = {}) {
+  const res = await fetch(`${HUBSPOT_BASE}${path}`, {
+    ...options,
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${process.env.HUBSPOT_PRIVATE_APP_TOKEN}`,
+    },
+  });
+  if (!res.ok) throw new Error("HubSpot API error");
+  return res.json();
+}
+
+async function findContactByEmail(email) {
+  const data = await hubSpotFetch("/crm/v3/objects/contacts/search", {
+    method: "POST",
+    body: JSON.stringify({
+      filterGroups: [{ filters: [{ propertyName: "email", operator: "EQ", value: email }] }],
+      limit: 1,
+    }),
+  });
+  return data.results?.[0] || null;
+}
+
+async function getDealsForContact(contactId, email) {
+  const assoc = await hubSpotFetch(
+    `/crm/v4/objects/contacts/${contactId}/associations/deals`
+  );
+  const ids = assoc.results.map((r) => r.toObjectId);
+  if (!ids.length) return [];
+
+  const batch = await hubSpotFetch("/crm/v3/objects/deals/batch/read", {
+    method: "POST",
+    body: JSON.stringify({
+      properties: ["dealname", "amount", "total_amount_paid", ...PAYMENT_FIELDS],
+      inputs: ids.map((id) => ({ id })),
+    }),
+  });
+
+  return batch.results.map((d) => ({
+    id: d.id,
+    properties: { ...d.properties, email },
+  }));
+}
+
+async function getDealById(dealId) {
+  const data = await hubSpotFetch(
+    `/crm/v3/objects/deals/${dealId}?properties=${PAYMENT_FIELDS.join(",")}`
+  );
+  return data?.id ? { id: data.id, properties: data.properties } : null;
+}
+
+/* =========================================================
+   UTILS
+========================================================= */
+
+function parsePayments(p) {
+  return PAYMENT_FIELDS.map((k) => p[k])
+    .filter(Boolean)
+    .map((raw) => {
+      const [amount] = raw.split(",");
+      return { amount: safeNumber(amount) };
+    });
+}
+
+function safeNumber(v) {
+  const n = Number(v);
+  return isNaN(n) ? 0 : n;
+}
+
+function htmlResponse(statusCode, html) {
+  return { statusCode, headers: { "Content-Type": "text/html" }, body: html };
+}
+
+function textResponse(statusCode, text) {
+  return { statusCode, headers: { "Content-Type": "text/plain" }, body: text };
+}
+
+function basicPage(title, body) {
+  return `<h1>${escapeHtml(title)}</h1>${body}`;
+}
+
+function escapeHtml(str) {
+  return String(str || "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
