@@ -15,13 +15,14 @@ const DEPOSIT_TARGET = 2500; // USD
 const DEPOSIT_BUTTON_HIDE_AT_PAID = 2250;
 const CARD_FEE_RATE = 0.035;
 
-// ✅ Success URLs
+// Success URLs
 const SUCCESS_URL_FIRST_PAYMENT =
   "https://www.pacificdiscovery.org/student/payment/pay-now/payment-success";
 
 const SUCCESS_URL_REPEAT_PAYMENT =
   "https://www.pacificdiscovery.org/student/payment/pay-now/payment-received";
 
+// Pay later URL
 const PAY_LATER_URL =
   "https://www.pacificdiscovery.org/student/payment/pay-now/payment-success";
 
@@ -134,9 +135,10 @@ async function handleStripeCheckout(event, url) {
     label = "Program Deposit";
   } else if (type === "custom") {
     const amt = safeNumber(url.searchParams.get("amount"));
-    if (isNaN(amt) || amt < APP_FEE || (!isNaN(remaining) && amt > remaining)) {
-      return textResponse(400, "Invalid amount.");
-    }
+    if (isNaN(amt)) return textResponse(400, "Invalid amount.");
+    if (amt < APP_FEE) return textResponse(400, "Minimum payment is $250.");
+    if (!isNaN(remaining) && amt > remaining)
+      return textResponse(400, "Amount cannot exceed remaining balance.");
     base = amt;
     label = "Custom Payment";
   } else {
@@ -153,12 +155,11 @@ async function handleStripeCheckout(event, url) {
 
   const baseUrl = new URL(event.rawUrl);
   baseUrl.search = "";
-
   const cancelUrl = new URL(baseUrl.toString());
   cancelUrl.searchParams.set("dealId", dealId);
   if (email) cancelUrl.searchParams.set("email", email);
 
-  // ✅ First payment = no payments made at all
+  // ✅ FIRST PAYMENT = NO PAYMENTS MADE AT ALL
   const isFirstPayment = totalPaid === 0;
 
   const successUrl = isFirstPayment
@@ -194,7 +195,7 @@ async function handleStripeCheckout(event, url) {
 }
 
 /* =========================================================
-   HUBSPOT + UTILS (unchanged)
+   HUBSPOT HELPERS
 ========================================================= */
 
 async function hubSpotFetch(path, options = {}) {
@@ -217,27 +218,32 @@ async function hubSpotFetch(path, options = {}) {
 }
 
 async function findContactByEmail(email) {
+  const body = {
+    filterGroups: [
+      { filters: [{ propertyName: "email", operator: "EQ", value: email }] },
+    ],
+    properties: ["email", "firstname", "lastname"],
+    limit: 1,
+  };
+
   const data = await hubSpotFetch("/crm/v3/objects/contacts/search", {
     method: "POST",
-    body: JSON.stringify({
-      filterGroups: [
-        { filters: [{ propertyName: "email", operator: "EQ", value: email }] },
-      ],
-      properties: ["email"],
-      limit: 1,
-    }),
+    body: JSON.stringify(body),
   });
-  return data.results?.[0]
-    ? { id: data.results[0].id, properties: data.results[0].properties }
-    : null;
+
+  if (!data.results || data.results.length === 0) return null;
+  return { id: data.results[0].id, properties: data.results[0].properties || {} };
 }
 
 async function getDealsForContact(contactId, email) {
   const assoc = await hubSpotFetch(
     `/crm/v4/objects/contacts/${contactId}/associations/deals`
   );
-  const dealIds = assoc.results?.map((r) => r.toObjectId) || [];
-  if (!dealIds.length) return [];
+
+  const dealIds =
+    assoc.results?.map((r) => r.toObjectId).filter(Boolean) || [];
+
+  if (dealIds.length === 0) return [];
 
   const batch = await hubSpotFetch("/crm/v3/objects/deals/batch/read", {
     method: "POST",
@@ -247,10 +253,15 @@ async function getDealsForContact(contactId, email) {
     }),
   });
 
-  return batch.results.map((d) => ({
-    id: d.id,
-    properties: { ...d.properties, email },
-  }));
+  return (
+    batch.results?.map((d) => ({
+      id: d.id,
+      properties: {
+        ...(d.properties || {}),
+        email,
+      },
+    })) || []
+  );
 }
 
 async function getDealById(dealId) {
@@ -259,35 +270,63 @@ async function getDealById(dealId) {
       ["dealname", "amount", "total_amount_paid", ...PAYMENT_FIELDS].join(",")
     )}`
   );
-  return data?.id ? { id: data.id, properties: data.properties } : null;
+
+  if (!data || !data.id) return null;
+  return { id: data.id, properties: data.properties || {} };
 }
+
+/* =========================================================
+   PAYMENT PARSING
+========================================================= */
 
 function parsePayments(p) {
   const payments = [];
+
   PAYMENT_FIELDS.forEach((key) => {
-    if (!p[key]) return;
-    const [amount, txn, date] = p[key].split(",").map((s) => s.trim());
-    const num = safeNumber(amount);
-    if (!isNaN(num)) payments.push({ amount: num, txn, date });
+    const raw = p[key];
+    if (!raw) return;
+
+    const parts = raw.split(",").map((s) => s.trim());
+    if (!parts[0]) return;
+
+    const amount = safeNumber(parts[0]);
+    const txn = parts[1] || "";
+    const date = parts[2] || "";
+
+    if (!isNaN(amount)) payments.push({ amount, txn, date });
   });
+
   return payments;
 }
 
+/* =========================================================
+   UTILITIES
+========================================================= */
+
 function safeNumber(val) {
-  const n = Number(val);
-  return isNaN(n) ? NaN : n;
+  if (val === null || val === undefined || val === "") return NaN;
+  const num = Number(val);
+  return isNaN(num) ? NaN : num;
 }
 
 function htmlResponse(statusCode, html) {
-  return { statusCode, headers: { "Content-Type": "text/html" }, body: html };
+  return {
+    statusCode,
+    headers: { "Content-Type": "text/html; charset=utf-8" },
+    body: html,
+  };
 }
 
 function textResponse(statusCode, text) {
-  return { statusCode, headers: { "Content-Type": "text/plain" }, body: text };
+  return {
+    statusCode,
+    headers: { "Content-Type": "text/plain; charset=utf-8" },
+    body: text,
+  };
 }
 
-function basicPage(title, body) {
-  return `<h1>${escapeHtml(title)}</h1>${body}`;
+function basicPage(title, contentHtml) {
+  return `<div><h1>${escapeHtml(title)}</h1>${contentHtml}</div>`;
 }
 
 function escapeHtml(str) {
